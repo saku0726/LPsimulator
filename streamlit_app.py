@@ -24,6 +24,7 @@ st.markdown("""
     footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
+
 # --- Data & Constants ---
 EDU_COST = {
     "幼稚園(公立)": 23, "幼稚園(私立)": 53,
@@ -169,7 +170,7 @@ def plot_asset_transition(ages, balances_savings, balances_nisa, balances_taxabl
 
     fig.add_trace(go.Scatter(x=ages, y=arr_annual_balance/10000, name="世帯単年収支(右軸)", mode='lines', line=dict(color='#d62728', width=3, dash='dot'), hovertemplate='%{y:.1f}万円'), secondary_y=True)
 
-    fig.update_layout(barmode='relative', hovermode="x unified", height=500, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    fig.update_layout(barmode='relative', hovermode="x unified", height=550, legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5))
     return fig
 
 def plot_cashflow_breakdown(ages, years_count, arr_salary, arr_sp_salary, arr_pension, arr_child_allowance, arr_leave_benefit, arr_ret_income, arr_sp_pension, arr_withdrawal_amount, arr_exp_base, arr_exp_event, arr_exp_house, arr_exp_edu, arr_exp_car, arr_exp_nursing, arr_soc_ins, arr_sp_soc_ins, arr_inc_tax, arr_sp_inc_tax, arr_res_tax, arr_sp_res_tax, arr_ret_inc_tax, arr_ret_res_tax, arr_lump_sum_income):
@@ -185,7 +186,7 @@ def plot_cashflow_breakdown(ages, years_count, arr_salary, arr_sp_salary, arr_pe
     base_inc += y_sp_sal
 
     y_pen = arr_pension/10000
-    fig.add_trace(go.Bar(x=ages, y=y_pen, name="本人 年金・保険等(加給含)", offsetgroup=1, base=base_inc, customdata=y_pen, marker_color='#2ca02c', hovertemplate='%{customdata:.1f}万円'))
+    fig.add_trace(go.Bar(x=ages, y=y_pen, name="本人 年金・保険等", offsetgroup=1, base=base_inc, customdata=y_pen, marker_color='#2ca02c', hovertemplate='%{customdata:.1f}万円'))
     base_inc += y_pen
     
     y_ret = arr_ret_income/10000
@@ -193,7 +194,7 @@ def plot_cashflow_breakdown(ages, years_count, arr_salary, arr_sp_salary, arr_pe
     base_inc += y_ret
 
     y_leave = arr_leave_benefit/10000
-    fig.add_trace(go.Bar(x=ages, y=y_leave, name="育休等の給付金(非課税)", offsetgroup=1, base=base_inc, customdata=y_leave, marker_color='#9edae5', hovertemplate='%{customdata:.1f}万円'))
+    fig.add_trace(go.Bar(x=ages, y=y_leave, name="育休給付金(非課税)", offsetgroup=1, base=base_inc, customdata=y_leave, marker_color='#9edae5', hovertemplate='%{customdata:.1f}万円'))
     base_inc += y_leave
 
     y_child_allowance = arr_child_allowance/10000
@@ -201,7 +202,7 @@ def plot_cashflow_breakdown(ages, years_count, arr_salary, arr_sp_salary, arr_pe
     base_inc += y_child_allowance
     
     y_lump = arr_lump_sum_income/10000
-    fig.add_trace(go.Bar(x=ages, y=y_lump, name="一時収入(iDeCo・車売却等)", offsetgroup=1, base=base_inc, customdata=y_lump, marker_color='#ff7f0e', hovertemplate='%{customdata:.1f}万円'))
+    fig.add_trace(go.Bar(x=ages, y=y_lump, name="一時収入(iDeCo等)", offsetgroup=1, base=base_inc, customdata=y_lump, marker_color='#ff7f0e', hovertemplate='%{customdata:.1f}万円'))
     base_inc += y_lump
 
     y_sp_pen = arr_sp_pension/10000
@@ -263,7 +264,7 @@ def plot_cashflow_breakdown(ages, years_count, arr_salary, arr_sp_salary, arr_pe
     y_ret_tax = (arr_ret_inc_tax + arr_ret_res_tax) / 10000
     fig.add_trace(go.Bar(x=ages, y=y_ret_tax, name="退職関連税(世帯)", offsetgroup=2, base=base_exp, customdata=y_ret_tax, marker_color='#000000', hovertemplate='%{customdata:.1f}万円'))
 
-    fig.update_layout(barmode='group', hovermode="x unified", height=600, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    fig.update_layout(barmode='group', hovermode="x unified", height=650, legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5))
     return fig
 
 # --- UI Inputs ---
@@ -996,6 +997,22 @@ try:
     if has_marriage: sp_pension_actual = calc_pension_amount(sp_pension_base, sp_pension_start_age)
     else: sp_pension_actual = 0
     
+    edu_total_paid = 0
+    if has_edu_ins:
+        if edu_pay_type == "積立中（分割払い）":
+            edu_paid_so_far = (current_age - edu_pay_start_age) * edu_monthly * 12
+            edu_total_paid = edu_paid_so_far + (edu_monthly * 12) * max(0, edu_pay_end_age - current_age)
+        elif edu_pay_type == "一時払い（これから支払う）":
+            edu_total_paid = edu_lump_pay
+
+    life_total_paid = 0
+    if has_life_ins:
+        if life_pay_type == "積立中（分割払い）":
+            life_paid_so_far = (current_age - life_pay_start_age) * life_monthly * 12
+            life_total_paid = life_paid_so_far + (life_monthly * 12) * max(0, life_pay_end_age - current_age)
+        elif life_pay_type == "一時払い（これから支払う）":
+            life_total_paid = life_lump_pay
+    
     def get_family_scale(main_alive, spouse_alive, children_ages):
         scale = 0.0
         if main_alive: scale += 1.0
@@ -1375,9 +1392,8 @@ try:
                 ret_inc_tax_sp += it; ret_res_tax_sp += rt
                 ideco_lump_net_sp = (sp_ideco_lump_sum - it - rt)
 
-        arr_ret_inc_tax[i] += (ret_inc_tax_main + ret_inc_tax_sp)
-        arr_ret_res_tax[i] += (ret_res_tax_main + ret_res_tax_sp)
-        
+        arr_ret_inc_tax[i] = ret_inc_tax_main + ret_inc_tax_sp
+        arr_ret_res_tax[i] = ret_res_tax_main + ret_res_tax_sp
         arr_ret_income[i] = ret_net_main + ret_net_sp
         
         net_income_main = salary + pension + actual_insurance_income + child_allowance_this_year + leave_benefit_main - soc_ins - income_tax - res_tax
@@ -1753,12 +1769,12 @@ try:
 
     st.markdown("### 📈 資産推移と年間収支 (単位：万円)")
     fig1 = plot_asset_transition(ages, balances_savings, balances_nisa, balances_taxable, balances_ideco_dc, arr_debt_housing, arr_debt_car, arr_debt_reform, arr_debt_edu, arr_annual_balance)
-    st.plotly_chart(fig1, use_container_width=True)
+    st.plotly_chart(fig1, use_container_width=True, config={'displayModeBar': False})
     st.caption("※特定口座の資産残高は、簡易計算のため毎年課税（税引後リターン適用）されているものとして算出しています。")
 
     st.markdown("### 💰 年間収支の内訳比較（額面ベース / 単位：万円）")
     fig2 = plot_cashflow_breakdown(ages, years_count, arr_salary, arr_sp_salary, arr_pension, arr_child_allowance, arr_leave_benefit, arr_ret_income, arr_sp_pension, arr_withdrawal_amount, arr_exp_base, arr_exp_event, arr_exp_house, arr_exp_edu, arr_exp_car, arr_exp_nursing, arr_soc_ins, arr_sp_soc_ins, arr_inc_tax, arr_sp_inc_tax, arr_res_tax, arr_sp_res_tax, arr_ret_inc_tax, arr_ret_res_tax, arr_lump_sum_income)
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, use_container_width=True, config={'displayModeBar': False})
 
     st.markdown("### 📋 世帯キャッシュフロー表 (単位: 万円)")
     df = pd.DataFrame({
@@ -1797,41 +1813,46 @@ try:
 
     style_func = lambda x: 'color: red' if isinstance(x, (int, float)) and x < 0 else ''
     try:
-        st.dataframe(df.style.format("{:.1f}").map(style_func, subset=['世帯年間収支', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額']), height=400)
+        st.dataframe(df.style.format("{:.1f}").map(style_func, subset=['世帯年間収支', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額']), height=400, use_container_width=True)
     except AttributeError:
-        st.dataframe(df.style.format("{:.1f}").applymap(style_func, subset=['世帯年間収支', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額']), height=400)
+        st.dataframe(df.style.format("{:.1f}").applymap(style_func, subset=['世帯年間収支', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額']), height=400, use_container_width=True)
 
     # --- アフィリエイト・ネクストアクション エリア ---
     st.markdown("---")
-    st.markdown("### 💡 シミュレーション結果はいかがでしたか？")
-    st.write("結果をもとに、より具体的なライフプランの改善や資産運用のアクションを起こしてみましょう。")
+    st.markdown("### 💡 シミュレーション結果からのネクストアクション")
+    st.write("あなたのシミュレーション結果に基づいた、おすすめのアクションです。")
+
+    st.subheader("📱 まずは日々の家計を可視化しよう")
+    st.write("精度の高いシミュレーションを行うには、現在の支出を正確に把握することが重要です。銀行やクレカと自動連携できる家計簿アプリがおすすめです。")
+    st.link_button("人気の無料家計簿アプリをインストールする (PR)", "https://example.com/?a=kakeibo")
 
     col_btn1, col_btn2 = st.columns(2)
-
+    
     with col_btn1:
-        st.info("📉 **将来の資金不足や家計に不安がある方へ**")
-        st.write("プロのファイナンシャルプランナーに、現在の家計やローン・保険の見直しを無料で相談できます。")
-        st.link_button(
-            "👨‍💼 【無料】プロにライフプランを相談する (PR)",
-            "https://example.com/?a=fp_consulting_affiliate_id",
-            use_container_width=True
-        )
+        if depletion_age is not None:
+            st.error("📉 **将来の資金不足が予測されます**")
+            st.write("支出の見直しや、収入アップの検討が必要です。プロに相談するか、まずは固定費の削減から始めましょう。")
+            st.link_button("👨‍💼 【無料】プロにライフプラン・家計を相談する (PR)", "https://example.com/?a=fp")
+            st.link_button("📱 スマホ代を見直して固定費を下げる (PR)", "https://example.com/?a=sim")
+            st.link_button("💼 転職エージェントに登録して収入アップを目指す (PR)", "https://example.com/?a=tenshoku")
+        else:
+            st.success("📈 **将来の資金計画は順調です！**")
+            st.write("この調子で資産形成を進めましょう。NISAなどの非課税制度や、お得なポイント還元をフル活用するのがおすすめです。")
+            st.link_button("🚀 ネット証券（NISA口座）を比較・開設する (PR)", "https://example.com/?a=sec")
+            st.link_button("💳 積立投資でお得にポイントが貯まるクレカを作る (PR)", "https://example.com/?a=card")
 
     with col_btn2:
-        st.success("📈 **余裕資金で資産形成をスタート・最適化したい方へ**")
-        st.write("シミュレーションで設定したNISAの運用を実際に始めるため、おすすめのネット証券を比較・口座開設できます。")
-        st.link_button(
-            "🚀 ネット証券（NISA口座）を比較・開設する (PR)",
-            "https://example.com/?a=sec_service_affiliate_id",
-            use_container_width=True
-        )
+        has_mortgage_balance = arr_debt_housing.sum() > 0
+        if has_mortgage_balance:
+            st.info("🏠 **住宅ローンの見直しで数百万円浮くかも？**")
+            st.write("住宅ローン残高があります。金利の低いネット銀行などに借り換えることで、毎月の返済額や総支払額を大きく減らせる可能性があります。")
+            st.link_button("👉 モゲチェックで最適な借り換え金利を比較する (PR)", "https://example.com/?a=mogecheck")
+            
+        if (housing_type == "持ち家" or has_housing) and (depletion_age is not None or has_home_sale):
+            st.warning("🏢 **ご自宅の価値を確認してみませんか？**")
+            st.write("将来の資金不足や老人ホーム入居に向けて、現在の自宅の売却相場を知っておくことは資産形成において非常に重要です。")
+            st.link_button("🏠 無料で不動産の一括査定を申し込む (PR)", "https://example.com/?a=fudosan")
 
-    with st.expander("📝 住宅ローンの借り換えや金利比較について詳しく知る"):
-        st.markdown(
-            "住宅ローンの金利を少し下げるだけで、生涯の支払額が数百万円変わる可能性があります。<br>"
-            "👉 [モゲチェックで最適な住宅ローン金利を比較する (PR)](https://example.com/?a=mogecheck)",
-            unsafe_allow_html=True
-        )
 except Exception as e:
     st.error(f"シミュレーション中にエラーが発生しました: {e}")
     st.code(traceback.format_exc())
