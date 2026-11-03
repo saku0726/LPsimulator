@@ -11,13 +11,19 @@ st.set_page_config(page_title="FPライフプランシミュレータ", layout="
 # --- CSS Styling ---
 st.markdown("""
 <style>
+    /* 既存のカードデザイン設定 */
     .metric-card { background-color: #f8f9fa; border-radius: 10px; padding: 15px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); text-align: center; }
     .metric-title { font-size: 1.1rem; font-weight: 600; color: #495057; margin-bottom: 5px; }
     .metric-value { font-size: 2rem; font-weight: 700; color: #007bff; }
     .metric-value.red { color: #dc3545; }
+
+    /* 追加：右上のメニュー（GitHub情報など）とフッターを非表示にする */
+    [data-testid="stHeader"] { visibility: hidden; }
+    [data-testid="stToolbar"] { visibility: hidden; }
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
-
 # --- Data & Constants ---
 EDU_COST = {
     "幼稚園(公立)": 23, "幼稚園(私立)": 53,
