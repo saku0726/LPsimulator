@@ -121,6 +121,43 @@ def calc_loan_balance(principal, rate, years, current_year):
     balance = principal * (((1+r)**n - (1+r)**current_month) / ((1+r)**n - 1))
     return max(0, balance)
 
+def generate_mortgage_schedule(principal, initial_rate, total_years, rate_up_year=1000, rate_up_rate=0.0):
+    """金利変更シナリオに対応した住宅ローンの各年の返済額と残高を計算して配列で返す"""
+    schedule_pmt = np.zeros(total_years)
+    schedule_balance = np.zeros(total_years)
+    balance = principal
+    current_rate = initial_rate
+    
+    for y in range(total_years):
+        if y == rate_up_year:
+            current_rate = rate_up_rate
+            
+        if balance <= 0:
+            schedule_pmt[y] = 0
+            schedule_balance[y] = 0
+            continue
+            
+        if current_rate == 0:
+            pmt = balance / (total_years - y)
+            schedule_pmt[y] = pmt
+            balance -= pmt
+            schedule_balance[y] = max(0, balance)
+        else:
+            r = current_rate / 12
+            n = (total_years - y) * 12
+            pmt_monthly = (balance * r * ((1+r)**n) / (((1+r)**n) - 1)) if n > 0 else balance
+            pmt_annual = pmt_monthly * 12
+            schedule_pmt[y] = pmt_annual
+            
+            # 月ごとの元本減少を1年分進める
+            for _ in range(12):
+                interest = balance * r
+                principal_payment = pmt_monthly - interest
+                balance -= principal_payment
+            schedule_balance[y] = max(0, balance)
+            
+    return schedule_pmt, schedule_balance
+
 def get_ret_deduction(years):
     if years <= 20: return max(800000, 400000 * max(1, years))
     else: return 8000000 + 700000 * (years - 20)
@@ -170,7 +207,7 @@ def plot_asset_transition(ages, balances_savings, balances_nisa, balances_taxabl
 
     fig.add_trace(go.Scatter(x=ages, y=arr_annual_balance/10000, name="世帯単年収支(右軸)", mode='lines', line=dict(color='#d62728', width=3, dash='dot'), hovertemplate='%{y:.1f}万円'), secondary_y=True)
 
-    fig.update_layout(barmode='relative', hovermode="x unified", height=550, legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5))
+    fig.update_layout(barmode='relative', hovermode="x unified", height=500, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     return fig
 
 def plot_cashflow_breakdown(ages, years_count, arr_salary, arr_sp_salary, arr_pension, arr_child_allowance, arr_leave_benefit, arr_ret_income, arr_sp_pension, arr_withdrawal_amount, arr_exp_base, arr_exp_event, arr_exp_house, arr_exp_edu, arr_exp_car, arr_exp_nursing, arr_soc_ins, arr_sp_soc_ins, arr_inc_tax, arr_sp_inc_tax, arr_res_tax, arr_sp_res_tax, arr_ret_inc_tax, arr_ret_res_tax, arr_lump_sum_income):
@@ -186,7 +223,7 @@ def plot_cashflow_breakdown(ages, years_count, arr_salary, arr_sp_salary, arr_pe
     base_inc += y_sp_sal
 
     y_pen = arr_pension/10000
-    fig.add_trace(go.Bar(x=ages, y=y_pen, name="本人 年金・保険等", offsetgroup=1, base=base_inc, customdata=y_pen, marker_color='#2ca02c', hovertemplate='%{customdata:.1f}万円'))
+    fig.add_trace(go.Bar(x=ages, y=y_pen, name="本人 年金・保険等(加給含)", offsetgroup=1, base=base_inc, customdata=y_pen, marker_color='#2ca02c', hovertemplate='%{customdata:.1f}万円'))
     base_inc += y_pen
     
     y_ret = arr_ret_income/10000
@@ -194,7 +231,7 @@ def plot_cashflow_breakdown(ages, years_count, arr_salary, arr_sp_salary, arr_pe
     base_inc += y_ret
 
     y_leave = arr_leave_benefit/10000
-    fig.add_trace(go.Bar(x=ages, y=y_leave, name="育休給付金(非課税)", offsetgroup=1, base=base_inc, customdata=y_leave, marker_color='#9edae5', hovertemplate='%{customdata:.1f}万円'))
+    fig.add_trace(go.Bar(x=ages, y=y_leave, name="育休等の給付金(非課税)", offsetgroup=1, base=base_inc, customdata=y_leave, marker_color='#9edae5', hovertemplate='%{customdata:.1f}万円'))
     base_inc += y_leave
 
     y_child_allowance = arr_child_allowance/10000
@@ -202,7 +239,7 @@ def plot_cashflow_breakdown(ages, years_count, arr_salary, arr_sp_salary, arr_pe
     base_inc += y_child_allowance
     
     y_lump = arr_lump_sum_income/10000
-    fig.add_trace(go.Bar(x=ages, y=y_lump, name="一時収入(iDeCo等)", offsetgroup=1, base=base_inc, customdata=y_lump, marker_color='#ff7f0e', hovertemplate='%{customdata:.1f}万円'))
+    fig.add_trace(go.Bar(x=ages, y=y_lump, name="一時収入(iDeCo・車売却等)", offsetgroup=1, base=base_inc, customdata=y_lump, marker_color='#ff7f0e', hovertemplate='%{customdata:.1f}万円'))
     base_inc += y_lump
 
     y_sp_pen = arr_sp_pension/10000
@@ -452,29 +489,75 @@ with tabs[3]:
                 rent_inflation_rate = st.slider("家賃のインフレ率 (年換算 %)", 0.0, 5.0, 1.0) / 100
             else:
                 rent_inflation_rate = 0.0
+                
+            has_existing_mortgage = False
+            ex_housing_loan_balance = ex_housing_loan_years_remaining = ex_housing_loan_rate = 0
+            ex_housing_rate_up_years = 1000
+            ex_housing_rate_up_rate = 0.0
+            has_ex_mortgage_deduction = False
+            ex_mortgage_deduction_rate = ex_mortgage_deduction_years_remaining = ex_mortgage_deduction_max = 0
         else:
-            rent_annual = 0
-            rent_inflation_rate = 0.0
+            has_existing_mortgage = st.checkbox("現在返済中の住宅ローンあり", value=False)
+            if has_existing_mortgage:
+                ex_housing_loan_balance = st.number_input("現在の住宅ローン残高（万円）", value=2000, step=10) * 10000
+                ex_housing_loan_years_remaining = st.slider("残りの返済期間（年）", 1, 50, 20)
+                ex_housing_loan_type = st.radio("現在の金利タイプ", ["固定金利", "変動金利"], key="ex_loan_type")
+                ex_housing_loan_rate = st.slider("現在の適用金利 (%)", 0.1, 5.0, 0.5, key="ex_loan_rate") / 100
+                if ex_housing_loan_type == "変動金利":
+                    st.markdown("**将来の金利上昇シナリオ**")
+                    ex_housing_rate_up_years = st.slider("何年後に金利が上昇するか", 1, ex_housing_loan_years_remaining, 5, key="ex_rate_up_y")
+                    ex_housing_rate_up_rate = st.slider("上昇後の金利 (%)", 0.1, 5.0, 1.5, key="ex_rate_up_r") / 100
+                else:
+                    ex_housing_rate_up_years = 1000
+                    ex_housing_rate_up_rate = 0.0
+                
+                has_ex_mortgage_deduction = st.checkbox("住宅ローン控除を現在利用している", value=True)
+                if has_ex_mortgage_deduction:
+                    ex_mortgage_deduction_rate = st.slider("既存ローンの控除率 (%)", 0.1, 1.0, 0.7, key="ex_ded_rate") / 100
+                    ex_mortgage_deduction_years_remaining = st.slider("既存ローンの残り控除期間 (年)", 1, 13, 10)
+                    ex_mortgage_deduction_max = st.number_input("既存ローンの借入限度額（万円）", value=3000, step=100, key="ex_ded_max") * 10000
+                else:
+                    ex_mortgage_deduction_rate = ex_mortgage_deduction_years_remaining = ex_mortgage_deduction_max = 0
+            else:
+                ex_housing_loan_balance = ex_housing_loan_years_remaining = ex_housing_loan_rate = 0
+                ex_housing_rate_up_years = 1000
+                ex_housing_rate_up_rate = 0.0
+                has_ex_mortgage_deduction = False
+                ex_mortgage_deduction_rate = ex_mortgage_deduction_years_remaining = ex_mortgage_deduction_max = 0
+
+            rent_annual = rent_inflation_rate = 0
             rent_renewal_years = 1
             rent_renewal_fee_months = 0
 
         has_housing = st.checkbox("将来の住宅購入予定あり", value=False)
         if has_housing:
             housing_purchase_age = st.slider("住宅購入する本人の年齢", current_age, 90, current_age + 3)
-            housing_loan_amount = st.number_input("住宅借入額（万円）", value=3000, step=1) * 10000
-            housing_loan_rate = st.slider("住宅ローン金利 (%)", 0.1, 5.0, 1.0) / 100
-            housing_loan_years = st.slider("住宅ローン返済期間（年）", 10, 50, 35)
-            housing_down_payment = st.number_input("頭金・諸費用（万円）", value=500, step=1) * 10000
+            housing_loan_amount = st.number_input("住宅借入額（万円）", value=3000, step=10) * 10000
+            housing_loan_type = st.radio("新規ローンの金利タイプ", ["固定金利", "変動金利"], key="new_loan_type")
+            housing_loan_rate = st.slider("新規ローン金利 (%)", 0.1, 5.0, 1.0, key="new_loan_rate") / 100
+            housing_loan_years = st.slider("新規ローン返済期間（年）", 10, 50, 35)
+            
+            if housing_loan_type == "変動金利":
+                st.markdown("**将来の金利上昇シナリオ**")
+                housing_rate_up_years = st.slider("借入から何年後に金利が上昇するか", 1, housing_loan_years, 5, key="new_rate_up_y")
+                housing_rate_up_rate = st.slider("上昇後の新規ローン金利 (%)", 0.1, 5.0, 2.0, key="new_rate_up_r") / 100
+            else:
+                housing_rate_up_years = 1000
+                housing_rate_up_rate = 0.0
+
+            housing_down_payment = st.number_input("頭金・諸費用（万円）", value=500, step=10) * 10000
             housing_maint = st.number_input("固定資産税・火災保険等(万円/年)", value=20, step=1) * 10000
-            has_mortgage_deduction = st.checkbox("住宅ローン控除を利用する", value=True)
+            has_mortgage_deduction = st.checkbox("住宅ローン控除を利用する", value=True, key="new_ded_chk")
             if has_mortgage_deduction:
-                mortgage_deduction_rate = st.slider("控除率 (%)", 0.1, 1.0, 0.7) / 100
-                mortgage_deduction_years = st.slider("控除期間 (年)", 10, 13, 13)
-                mortgage_deduction_max = st.number_input("借入限度額（万円）", value=3000, step=100) * 10000
+                mortgage_deduction_rate = st.slider("新規控除率 (%)", 0.1, 1.0, 0.7, key="new_ded_rate") / 100
+                mortgage_deduction_years = st.slider("新規控除期間 (年)", 10, 13, 13, key="new_ded_years")
+                mortgage_deduction_max = st.number_input("新規借入限度額（万円）", value=3000, step=100, key="new_ded_max") * 10000
             else:
                 mortgage_deduction_rate = mortgage_deduction_years = mortgage_deduction_max = 0
         else:
             housing_purchase_age = housing_loan_amount = housing_loan_rate = housing_loan_years = housing_down_payment = housing_maint = 0
+            housing_rate_up_years = 1000
+            housing_rate_up_rate = 0.0
             has_mortgage_deduction = False
             mortgage_deduction_rate = mortgage_deduction_years = mortgage_deduction_max = 0
 
@@ -971,7 +1054,21 @@ try:
     last_rent_update_year = 0
 
     pension_actual = calc_pension_amount(pension_base, pension_start_age)
-    mortgage_annual = calc_mortgage_pmt(housing_loan_amount, housing_loan_rate, housing_loan_years)
+    
+    # 住宅ローン スケジュール事前計算
+    if housing_type == "持ち家" and has_existing_mortgage:
+        ex_m_pmt, ex_m_bal = generate_mortgage_schedule(
+            ex_housing_loan_balance, ex_housing_loan_rate, ex_housing_loan_years_remaining,
+            ex_housing_rate_up_years if ex_housing_loan_type == "変動金利" else 1000,
+            ex_housing_rate_up_rate
+        )
+    
+    if has_housing:
+        new_m_pmt, new_m_bal = generate_mortgage_schedule(
+            housing_loan_amount, housing_loan_rate, housing_loan_years,
+            housing_rate_up_years if housing_loan_type == "変動金利" else 1000,
+            housing_rate_up_rate
+        )
 
     curr_main_nisa = initial_nisa
     curr_main_taxable = initial_taxable
@@ -1033,13 +1130,24 @@ try:
     for i, age in enumerate(ages):
         h_debt, c_debt, r_debt, e_debt = 0, 0, 0, 0
         sp_age = age + sp_age_diff if has_marriage else 0
+        h_pmt_this_year = 0
         
+        if housing_type == "持ち家" and has_existing_mortgage:
+            if i < ex_housing_loan_years_remaining:
+                h_debt += ex_m_bal[i]
+                h_pmt_this_year += ex_m_pmt[i]
+            if has_ex_mortgage_deduction and i < ex_mortgage_deduction_years_remaining:
+                applicable_balance = min(ex_m_bal[i] if i < ex_housing_loan_years_remaining else 0, ex_mortgage_deduction_max)
+                arr_mortgage_deduction[i] += applicable_balance * ex_mortgage_deduction_rate
+
         if has_housing and age >= housing_purchase_age:
             years_passed = age - housing_purchase_age
-            h_debt = calc_loan_balance(housing_loan_amount, housing_loan_rate, housing_loan_years, years_passed)
+            if years_passed < housing_loan_years:
+                h_debt += new_m_bal[years_passed]
+                h_pmt_this_year += new_m_pmt[years_passed]
             if has_mortgage_deduction and 0 <= years_passed < mortgage_deduction_years:
-                applicable_balance = min(h_debt, mortgage_deduction_max)
-                arr_mortgage_deduction[i] = applicable_balance * mortgage_deduction_rate
+                applicable_balance = min(new_m_bal[years_passed] if years_passed < housing_loan_years else 0, mortgage_deduction_max)
+                arr_mortgage_deduction[i] += applicable_balance * mortgage_deduction_rate
                 
         if has_car and car_loan_use:
             c_age = car_first_purchase_age
@@ -1476,9 +1584,7 @@ try:
                     
                 if car_purchase_cost_this_year > 0:
                     if car_loan_use:
-                        pmt = calc_mortgage_pmt(car_purchase_cost_this_year, car_loan_rate, car_loan_years)
-                        for j in range(i, min(years_count, i + car_loan_years)):
-                            arr_car_loan_pmts[j] += pmt
+                        pass 
                     else:
                         exp_car += car_purchase_cost_this_year
                         
@@ -1492,9 +1598,7 @@ try:
                     
                 if sp_car_purchase_cost_this_year > 0:
                     if sp_car_loan_use:
-                        pmt = calc_mortgage_pmt(sp_car_purchase_cost_this_year, sp_car_loan_rate, sp_car_loan_years)
-                        for j in range(i, min(years_count, i + sp_car_loan_years)):
-                            arr_car_loan_pmts[j] += pmt
+                        pass
                     else:
                         exp_car += sp_car_purchase_cost_this_year
                         
@@ -1520,7 +1624,6 @@ try:
                 
         if has_housing:
             if age == housing_purchase_age: exp_house += housing_down_payment
-            if housing_purchase_age <= age < housing_purchase_age + housing_loan_years: exp_house += mortgage_annual
             if age >= housing_purchase_age: exp_house += housing_maint
             
         if has_reform and age == reform_age:
@@ -1529,7 +1632,7 @@ try:
             else:
                 exp_house += reform_cost
                 
-        normal_exp_house = exp_house + arr_reform_loan_pmts[i]
+        normal_exp_house = exp_house + arr_reform_loan_pmts[i] + h_pmt_this_year
                 
         for child in child_settings:
             c_age = age - child["birth_age"]
@@ -1710,7 +1813,7 @@ try:
             arr_debt_edu[i] = arr_debt_edu[i-1] * (1 + edu_loan_rate) if i > 0 else arr_debt_edu[i]
             arr_debt_balance[i] = arr_debt_housing[i] + arr_debt_car[i] + arr_debt_reform[i] + arr_debt_edu[i]
             
-            arr_exp_house[i] -= (arr_reform_loan_pmts[i] + mortgage_annual if has_housing and housing_purchase_age <= age < housing_purchase_age + housing_loan_years else 0)
+            arr_exp_house[i] -= (arr_reform_loan_pmts[i] + h_pmt_this_year)
             arr_exp_car[i] -= arr_car_loan_pmts[i]
             arr_exp_edu[i] -= arr_edu_loan_pmts[i]
             
