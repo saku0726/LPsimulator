@@ -38,7 +38,8 @@ EDU_COST = {
     "小学校(公立)": 35, "小学校(私立)": 166,
     "中学校(公立)": 50, "中学校(私立)": 143,
     "高校(公立)": 46,   "高校(私立)": 103,
-    "大学(国公立)": 125, "大学(私立文系)": 175, "大学(私立理系)": 212
+    "国公立大学(4年)": 125, "私立大学文系(4年)": 175, "私立大学理系(4年)": 212,
+    "短大(2年)": 100, "専門学校(2年)": 100
 }
 
 INCOME_TAX_BRACKETS = [
@@ -209,7 +210,7 @@ def plot_asset_transition(ages, balances_savings, balances_nisa, balances_taxabl
     if arr_debt_edu.sum() > 0:
         fig.add_trace(go.Bar(x=ages, y=-arr_debt_edu/10000, name="教育ローン残高", marker_color='#17becf', base=0, hovertemplate='教育ローン: %{y:.1f}万円'), secondary_y=False)
 
-    fig.add_trace(go.Scatter(x=ages, y=arr_annual_balance/10000, name="世帯単年収支(右軸)", mode='lines', line=dict(color='#d62728', width=3, dash='dot'), hovertemplate='%{y:.1f}万円'), secondary_y=True)
+    fig.add_trace(go.Scatter(x=ages, y=arr_annual_balance/10000, name="世帯単年収支(経常)", mode='lines', line=dict(color='#d62728', width=3, dash='dot'), hovertemplate='%{y:.1f}万円'), secondary_y=True)
 
     fig.update_xaxes(fixedrange=True)
     fig.update_yaxes(fixedrange=True)
@@ -321,24 +322,24 @@ with tabs[0]:
     st.header("本人の基本・収入・退職")
     col1, col2 = st.columns(2)
     with col1:
-        current_age = st.slider("現在の年齢", 20, 80, 40)
-        life_expectancy = st.slider("シミュレーション終了年齢", 80, 110, 95)
-        employment_start_age = st.slider("入社(就業開始)年齢", 15, 65, 22)
+        current_age = st.number_input("現在の年齢", min_value=20, max_value=80, value=40, step=1)
+        life_expectancy = st.number_input("シミュレーション終了年齢", min_value=80, max_value=110, value=95, step=1)
+        employment_start_age = st.number_input("入社(就業開始)年齢", min_value=15, max_value=65, value=22, step=1)
         is_working = st.radio("現在の就業状況(本人)", ["就業中（給与収入あり）", "既に退職済み（早期リタイア等）"])
     
     with col2:
         if is_working == "就業中（給与収入あり）":
             gross_income = st.number_input("現在の額面年収（万円）", value=600, step=10) * 10000
-            salary_growth = st.slider("毎年の昇給率 (%)", 0.0, 5.0, 1.0, step=0.1) / 100
+            salary_growth = st.number_input("毎年の昇給率 (%)", min_value=0.0, max_value=5.0, value=1.0, step=0.1) / 100
             has_salary_decrease = st.checkbox("役職定年等による給与減額あり(本人)")
             if has_salary_decrease:
-                salary_decrease_age = st.slider("減額される年齢", current_age, 85, 55)
-                salary_decrease_rate = st.slider("減額率 (%)", 10, 80, 30) / 100
+                salary_decrease_age = st.number_input("減額される年齢", min_value=current_age, max_value=85, value=55, step=1)
+                salary_decrease_rate = st.number_input("減額率 (%)", min_value=10, max_value=80, value=30, step=1) / 100
             else:
                 salary_decrease_age = 1000
                 salary_decrease_rate = 0.0
                 
-            retirement_age = st.slider("退職予定年齢(会社の退職金)", current_age, 100, 60)
+            retirement_age = st.number_input("退職予定年齢(会社の退職金)", min_value=current_age, max_value=100, value=60, step=1)
             retirement_allowance = st.number_input("会社の退職金見込額（万円）", value=1500, step=10) * 10000
             actual_is_working = True
         else:
@@ -346,15 +347,17 @@ with tabs[0]:
             salary_growth = 0
             salary_decrease_age = 1000
             salary_decrease_rate = 0.0
-            retirement_age = st.slider("退職した年齢(退職金受給済の場合は現在の年齢)", 20, current_age, current_age)
+            retirement_age = st.number_input("退職した年齢(退職金受給済の場合は現在の年齢)", min_value=20, max_value=current_age, value=current_age, step=1)
             retirement_allowance = st.number_input("これから受け取る予定の退職金（既に受取済・なしの場合は0）", value=0, step=10) * 10000
             actual_is_working = False
+            
+        ret_lump_dest = st.radio("退職金の入金先(本人)", ["預貯金へ", "NISA枠優先 (あふれた分は特定口座へ)", "特定口座へ(運用継続)"], index=0)
             
     st.divider()
     has_post_retirement_job = st.checkbox("退職後のアルバイト・副業収入あり(本人)")
     if has_post_retirement_job:
         post_retirement_income = st.number_input("退職後の収入(万円/月)", value=10, step=1) * 10000
-        post_retirement_end_age = st.slider("退職後の収入が続く年齢(本人)", retirement_age, 100, max(retirement_age, 65))
+        post_retirement_end_age = st.number_input("退職後の収入が続く年齢(本人)", min_value=retirement_age, max_value=100, value=max(retirement_age, 65), step=1)
     else:
         post_retirement_income = 0
         post_retirement_end_age = 0
@@ -365,25 +368,25 @@ with tabs[1]:
     if has_marriage:
         col1, col2 = st.columns(2)
         with col1:
-            sp_age_diff = st.slider("配偶者との年齢差(年下ならマイナス)", -20, 20, 0)
-            marriage_age = st.slider("結婚する本人の年齢(結婚済みなら現在年齢以下)", 20, 80, current_age)
+            sp_age_diff = st.number_input("配偶者との年齢差(年下ならマイナス)", min_value=-20, max_value=20, value=0, step=1)
+            marriage_age = st.number_input("結婚する本人の年齢(結婚済みなら現在年齢以下)", min_value=20, max_value=80, value=current_age, step=1)
             wedding_cost = st.number_input("結婚式等費用（万円）", value=300, step=10) * 10000
-            sp_employment_start_age = st.slider("配偶者の入社(就業開始)年齢", 15, 65, 22)
+            sp_employment_start_age = st.number_input("配偶者の入社(就業開始)年齢", min_value=15, max_value=65, value=22, step=1)
             sp_working_status = st.radio("現在の就業状況(配偶者)", ["就業中（給与収入あり）", "非就業・退職済み（専業主婦/夫等）"])
             
         with col2:
             if sp_working_status == "就業中（給与収入あり）":
                 sp_gross_income = st.number_input("配偶者の現在の額面年収（万円）", value=300, step=10) * 10000
-                sp_salary_growth = st.slider("配偶者の毎年の昇給率 (%)", 0.0, 5.0, 1.0, step=0.1) / 100
+                sp_salary_growth = st.number_input("配偶者の毎年の昇給率 (%)", min_value=0.0, max_value=5.0, value=1.0, step=0.1) / 100
                 has_sp_salary_decrease = st.checkbox("役職定年等による給与減額あり(配偶者)")
                 if has_sp_salary_decrease:
-                    sp_salary_decrease_age = st.slider("配偶者が減額される年齢", current_age + sp_age_diff, 85, 55)
-                    sp_salary_decrease_rate = st.slider("配偶者の減額率 (%)", 10, 80, 30) / 100
+                    sp_salary_decrease_age = st.number_input("配偶者が減額される年齢", min_value=current_age + sp_age_diff, max_value=85, value=55, step=1)
+                    sp_salary_decrease_rate = st.number_input("配偶者の減額率 (%)", min_value=10, max_value=80, value=30, step=1) / 100
                 else:
                     sp_salary_decrease_age = 1000
                     sp_salary_decrease_rate = 0.0
                     
-                sp_retirement_age = st.slider("配偶者の退職予定年齢", current_age + sp_age_diff, 100, 60)
+                sp_retirement_age = st.number_input("配偶者の退職予定年齢", min_value=current_age + sp_age_diff, max_value=100, value=60, step=1)
                 sp_retirement_allowance = st.number_input("配偶者の会社退職金見込額（万円）", value=500, step=10) * 10000
                 actual_sp_working = True
             else:
@@ -391,15 +394,17 @@ with tabs[1]:
                 sp_salary_growth = 0
                 sp_salary_decrease_age = 1000
                 sp_salary_decrease_rate = 0.0
-                sp_retirement_age = st.slider("配偶者の退職した年齢(受取済の場合は現在の年齢)", 20, current_age + sp_age_diff, current_age + sp_age_diff)
+                sp_retirement_age = st.number_input("配偶者の退職した年齢(受取済の場合は現在の年齢)", min_value=20, max_value=current_age + sp_age_diff, value=current_age + sp_age_diff, step=1)
                 sp_retirement_allowance = st.number_input("配偶者のこれから受け取る予定の退職金（受取済・なしは0）", value=0, step=10) * 10000
                 actual_sp_working = False
+                
+            sp_ret_lump_dest = st.radio("退職金の入金先(配偶者)", ["預貯金へ", "NISA枠優先 (あふれた分は特定口座へ)", "特定口座へ(運用継続)"], index=0)
         
         st.divider()
         has_sp_post_retirement_job = st.checkbox("退職後のアルバイト・副業収入あり(配偶者)")
         if has_sp_post_retirement_job:
             sp_post_retirement_income = st.number_input("配偶者の退職後収入(万円/月)", value=8, step=1) * 10000
-            sp_post_retirement_end_age = st.slider("配偶者の退職後収入が続く年齢", sp_retirement_age, 100, max(sp_retirement_age, 65))
+            sp_post_retirement_end_age = st.number_input("配偶者の退職後収入が続く年齢", min_value=sp_retirement_age, max_value=100, value=max(sp_retirement_age, 65), step=1)
         else:
             sp_post_retirement_income = 0
             sp_post_retirement_end_age = 0
@@ -413,11 +418,12 @@ with tabs[1]:
         sp_post_retirement_income = 0
         sp_post_retirement_end_age = 0
         actual_sp_working = False
+        sp_ret_lump_dest = "預貯金へ"
 
 with tabs[2]:
     st.header("家族・教育費")
     receive_child_allowance = st.checkbox("児童手当（こども手当）を受給する", value=True)
-    num_children = st.slider("子どもの人数", 0, 4, 0)
+    num_children = st.number_input("子どもの人数", min_value=0, max_value=4, value=0, step=1)
     child_settings = []
     
     if num_children > 0:
@@ -428,16 +434,16 @@ with tabs[2]:
                 child_status = st.radio(f"第{i+1}子の状況", ["これから生まれる", "既に生まれている"], key=f"status_{i}")
                 
                 if child_status == "これから生まれる":
-                    c_birth_age = st.slider(f"誕生時の本人の年齢", current_age, 80, current_age + 2 + (i*2), key=f"future_age_{i}")
+                    c_birth_age = st.number_input(f"誕生時の本人の年齢", min_value=current_age, max_value=80, value=current_age + 2 + (i*2), step=1, key=f"future_age_{i}")
                     
                     st.markdown("**産休・育休の取得予定**")
                     take_leave_main = st.checkbox("本人が取得する", key=f"leave_main_ck_{i}")
-                    leave_months_main = st.slider("本人の取得期間(ヶ月)", 1, 24, 12, key=f"leave_mon_main_{i}") if take_leave_main else 0
+                    leave_months_main = st.number_input("本人の取得期間(ヶ月)", min_value=1, max_value=24, value=12, step=1, key=f"leave_mon_main_{i}") if take_leave_main else 0
                         
                     take_leave_sp = st.checkbox("配偶者が取得する", key=f"leave_sp_ck_{i}") if has_marriage else False
-                    leave_months_sp = st.slider("配偶者の取得期間(ヶ月)", 1, 24, 12, key=f"leave_mon_sp_{i}") if take_leave_sp else 0
+                    leave_months_sp = st.number_input("配偶者の取得期間(ヶ月)", min_value=1, max_value=24, value=12, step=1, key=f"leave_mon_sp_{i}") if take_leave_sp else 0
                 else:
-                    c_current_age = st.slider(f"第{i+1}子の現在の年齢", 0, 30, 5, key=f"current_c_age_{i}")
+                    c_current_age = st.number_input(f"第{i+1}子の現在の年齢", min_value=0, max_value=30, value=5, step=1, key=f"current_c_age_{i}")
                     c_birth_age = current_age - c_current_age
                     st.caption(f"（逆算：本人が{c_birth_age}歳の時の子ども）")
                     leave_months_main = 0
@@ -447,10 +453,15 @@ with tabs[2]:
                 c_elem = st.selectbox(f"小学校", ["公立", "私立"], key=f"e_{i}")
                 c_mid = st.selectbox(f"中学校", ["公立", "私立"], key=f"m_{i}")
                 c_high = st.selectbox(f"高校", ["公立", "私立"], key=f"h_{i}")
-                c_uni = st.selectbox(f"大学", ["国公立", "私立文系", "私立理系", "なし"], key=f"u_{i}")
+                c_uni = st.selectbox(f"進学先(高校卒業後)", ["国公立大学(4年)", "私立大学文系(4年)", "私立大学理系(4年)", "短大(2年)", "専門学校(2年)", "なし"], key=f"u_{i}")
                 
                 if c_uni != "なし":
-                    st.markdown(f"**大学時代の仕送り支援**")
+                    if "2年" in c_uni:
+                        uni_end_age = 20
+                    else:
+                        uni_end_age = 22
+                        
+                    st.markdown(f"**進学期間中の仕送り支援**")
                     has_uni_support = st.checkbox("仕送りを行う", key=f"usup_{i}")
                     if has_uni_support:
                         uni_rent_support = st.number_input(f"家賃仕送り(万円/月)", value=5, step=1, key=f"urent_{i}") * 10000
@@ -459,6 +470,7 @@ with tabs[2]:
                         uni_rent_support = 0
                         uni_living_support = 0
                 else:
+                    uni_end_age = 18
                     has_uni_support = False
                     uni_rent_support = 0
                     uni_living_support = 0
@@ -469,15 +481,15 @@ with tabs[2]:
                     "leave_sp": leave_months_sp,
                     "course": [(4,6,f"幼稚園({c_kind})"), (7,12,f"小学校({c_elem})"), 
                                (13,15,f"中学校({c_mid})"), (16,18,f"高校({c_high})"),
-                               (19,22,f"大学({c_uni})" if c_uni != "なし" else None)],
-                    "uni_support": {"active": has_uni_support, "rent": uni_rent_support, "living": uni_living_support}
+                               (19,uni_end_age, c_uni if c_uni != "なし" else None)],
+                    "uni_support": {"active": has_uni_support, "rent": uni_rent_support, "living": uni_living_support, "start": 19, "end": uni_end_age}
                 })
         
     st.divider()
     use_edu_loan = st.checkbox("教育費にローン(奨学金等)を利用する")
     if use_edu_loan:
-        edu_loan_rate = st.slider("教育ローン・奨学金 金利(%)", 0.0, 5.0, 2.0, step=0.1) / 100
-        edu_loan_years = st.slider("教育ローン 返済期間(年)", 1, 20, 10)
+        edu_loan_rate = st.number_input("教育ローン・奨学金 金利(%)", min_value=0.0, max_value=5.0, value=2.0, step=0.1) / 100
+        edu_loan_years = st.number_input("教育ローン 返済期間(年)", min_value=1, max_value=20, value=10, step=1)
     else:
         edu_loan_rate = edu_loan_years = 0
 
@@ -488,13 +500,13 @@ with tabs[3]:
         st.subheader("住居設定")
         housing_type = st.radio("現在の住居形態", ["賃貸", "持ち家"])
         if housing_type == "賃貸":
-            rent_annual = st.number_input("現在の家賃・管理費等(万円/年)", value=120, step=1) * 10000
-            rent_renewal_years = st.slider("家賃の更新周期 (年)", 1, 10, 2)
-            rent_renewal_fee_months = st.slider("更新料 (新家賃の何ヶ月分)", 0.0, 3.0, 1.0, step=0.5)
+            rent_annual = st.number_input("現在の家賃・管理費等(万円/年)", value=120, step=10) * 10000
+            rent_renewal_years = st.number_input("家賃の更新周期 (年)", min_value=1, max_value=10, value=2, step=1)
+            rent_renewal_fee_months = st.number_input("更新料 (新家賃の何ヶ月分)", min_value=0.0, max_value=3.0, value=1.0, step=0.5)
             
             use_rent_inflation = st.checkbox("更新時の家賃インフレ(値上げ)を考慮する")
             if use_rent_inflation:
-                rent_inflation_rate = st.slider("家賃のインフレ率 (年換算 %)", 0.0, 5.0, 1.0, step=0.1) / 100
+                rent_inflation_rate = st.number_input("家賃のインフレ率 (年換算 %)", min_value=0.0, max_value=5.0, value=1.0, step=0.1) / 100
             else:
                 rent_inflation_rate = 0.0
                 
@@ -507,22 +519,22 @@ with tabs[3]:
         else:
             has_existing_mortgage = st.checkbox("現在返済中の住宅ローンあり", value=False)
             if has_existing_mortgage:
-                ex_housing_loan_balance = st.number_input("現在の住宅ローン残高（万円）", value=2000, step=10) * 10000
-                ex_housing_loan_years_remaining = st.slider("残りの返済期間（年）", 1, 50, 20)
+                ex_housing_loan_balance = st.number_input("現在の住宅ローン残高（万円）", value=2000, step=100) * 10000
+                ex_housing_loan_years_remaining = st.number_input("残りの返済期間（年）", min_value=1, max_value=50, value=20, step=1)
                 ex_housing_loan_type = st.radio("現在の金利タイプ", ["固定金利", "変動金利"], key="ex_loan_type")
-                ex_housing_loan_rate = st.slider("現在の適用金利 (%)", 0.1, 5.0, 0.5, step=0.1, key="ex_loan_rate") / 100
+                ex_housing_loan_rate = st.number_input("現在の適用金利 (%)", min_value=0.1, max_value=5.0, value=0.5, step=0.1, key="ex_loan_rate") / 100
                 if ex_housing_loan_type == "変動金利":
                     st.markdown("**将来の金利上昇シナリオ**")
-                    ex_housing_rate_up_years = st.slider("何年後に金利が上昇するか", 1, ex_housing_loan_years_remaining, 5, key="ex_rate_up_y")
-                    ex_housing_rate_up_rate = st.slider("上昇後の金利 (%)", 0.1, 5.0, 1.5, step=0.1, key="ex_rate_up_r") / 100
+                    ex_housing_rate_up_years = st.number_input("何年後に金利が上昇するか", min_value=1, max_value=ex_housing_loan_years_remaining, value=5, step=1, key="ex_rate_up_y")
+                    ex_housing_rate_up_rate = st.number_input("上昇後の金利 (%)", min_value=0.1, max_value=5.0, value=1.5, step=0.1, key="ex_rate_up_r") / 100
                 else:
                     ex_housing_rate_up_years = 1000
                     ex_housing_rate_up_rate = 0.0
                 
                 has_ex_mortgage_deduction = st.checkbox("住宅ローン控除を現在利用している", value=True)
                 if has_ex_mortgage_deduction:
-                    ex_mortgage_deduction_rate = st.slider("既存ローンの控除率 (%)", 0.1, 1.0, 0.7, step=0.1, key="ex_ded_rate") / 100
-                    ex_mortgage_deduction_years_remaining = st.slider("既存ローンの残り控除期間 (年)", 1, 13, 10)
+                    ex_mortgage_deduction_rate = st.number_input("既存ローンの控除率 (%)", min_value=0.1, max_value=1.0, value=0.7, step=0.1, key="ex_ded_rate") / 100
+                    ex_mortgage_deduction_years_remaining = st.number_input("既存ローンの残り控除期間 (年)", min_value=1, max_value=13, value=10, step=1)
                     ex_mortgage_deduction_max = st.number_input("既存ローンの借入限度額（万円）", value=3000, step=100, key="ex_ded_max") * 10000
                 else:
                     ex_mortgage_deduction_rate = ex_mortgage_deduction_years_remaining = ex_mortgage_deduction_max = 0
@@ -539,16 +551,16 @@ with tabs[3]:
 
         has_housing = st.checkbox("将来の住宅購入予定あり", value=False)
         if has_housing:
-            housing_purchase_age = st.slider("住宅購入する本人の年齢", current_age, 90, current_age + 3)
-            housing_loan_amount = st.number_input("住宅借入額（万円）", value=3000, step=10) * 10000
+            housing_purchase_age = st.number_input("住宅購入する本人の年齢", min_value=current_age, max_value=90, value=current_age + 3, step=1)
+            housing_loan_amount = st.number_input("住宅借入額（万円）", value=3000, step=100) * 10000
             housing_loan_type = st.radio("新規ローンの金利タイプ", ["固定金利", "変動金利"], key="new_loan_type")
-            housing_loan_rate = st.slider("新規ローン金利 (%)", 0.1, 5.0, 1.0, step=0.1, key="new_loan_rate") / 100
-            housing_loan_years = st.slider("新規ローン返済期間（年）", 10, 50, 35)
+            housing_loan_rate = st.number_input("新規ローン金利 (%)", min_value=0.1, max_value=5.0, value=1.0, step=0.1, key="new_loan_rate") / 100
+            housing_loan_years = st.number_input("新規ローン返済期間（年）", min_value=10, max_value=50, value=35, step=1)
             
             if housing_loan_type == "変動金利":
                 st.markdown("**将来の金利上昇シナリオ**")
-                housing_rate_up_years = st.slider("借入から何年後に金利が上昇するか", 1, housing_loan_years, 5, key="new_rate_up_y")
-                housing_rate_up_rate = st.slider("上昇後の新規ローン金利 (%)", 0.1, 5.0, 2.0, step=0.1, key="new_rate_up_r") / 100
+                housing_rate_up_years = st.number_input("借入から何年後に金利が上昇するか", min_value=1, max_value=housing_loan_years, value=5, step=1, key="new_rate_up_y")
+                housing_rate_up_rate = st.number_input("上昇後の新規ローン金利 (%)", min_value=0.1, max_value=5.0, value=2.0, step=0.1, key="new_rate_up_r") / 100
             else:
                 housing_rate_up_years = 1000
                 housing_rate_up_rate = 0.0
@@ -557,8 +569,8 @@ with tabs[3]:
             housing_maint = st.number_input("固定資産税・火災保険等(万円/年)", value=20, step=1) * 10000
             has_mortgage_deduction = st.checkbox("住宅ローン控除を利用する", value=True, key="new_ded_chk")
             if has_mortgage_deduction:
-                mortgage_deduction_rate = st.slider("新規控除率 (%)", 0.1, 1.0, 0.7, step=0.1, key="new_ded_rate") / 100
-                mortgage_deduction_years = st.slider("新規控除期間 (年)", 10, 13, 13, key="new_ded_years")
+                mortgage_deduction_rate = st.number_input("新規控除率 (%)", min_value=0.1, max_value=1.0, value=0.7, step=0.1, key="new_ded_rate") / 100
+                mortgage_deduction_years = st.number_input("新規控除期間 (年)", min_value=10, max_value=13, value=13, step=1, key="new_ded_years")
                 mortgage_deduction_max = st.number_input("新規借入限度額（万円）", value=3000, step=100, key="new_ded_max") * 10000
             else:
                 mortgage_deduction_rate = mortgage_deduction_years = mortgage_deduction_max = 0
@@ -571,12 +583,12 @@ with tabs[3]:
 
         has_reform = st.checkbox("住宅のリフォーム予定あり")
         if has_reform:
-            reform_age = st.slider("リフォームする本人の年齢", current_age, 100, current_age + 15)
-            reform_cost = st.number_input("リフォーム費用(万円)", value=300, step=1) * 10000
+            reform_age = st.number_input("リフォームする本人の年齢", min_value=current_age, max_value=100, value=current_age + 15, step=1)
+            reform_cost = st.number_input("リフォーム費用(万円)", value=300, step=10) * 10000
             use_reform_loan = st.checkbox("リフォームにローンを利用する")
             if use_reform_loan:
-                reform_loan_rate = st.slider("リフォームローン金利(%)", 0.1, 5.0, 2.0, step=0.1) / 100
-                reform_loan_years = st.slider("リフォームローン返済期間(年)", 1, 20, 10)
+                reform_loan_rate = st.number_input("リフォームローン金利(%)", min_value=0.1, max_value=5.0, value=2.0, step=0.1) / 100
+                reform_loan_years = st.number_input("リフォームローン返済期間(年)", min_value=1, max_value=20, value=10, step=1)
             else:
                 reform_loan_rate = reform_loan_years = 0
         else:
@@ -588,19 +600,19 @@ with tabs[3]:
         st.subheader("自動車設定（本人）")
         has_car = st.checkbox("本人用の車の所有・購入あり", value=False)
         if has_car:
-            car_first_purchase_age = st.slider("次回購入する本人の年齢", current_age, 90, current_age)
-            car_first_purchase_cost = st.number_input("次回の購入費用（万円）", value=300, step=1) * 10000
-            car_replace_cycle = st.slider("買い替え周期（年）", 3, 20, 7)
-            car_replace_cost = st.number_input("それ以降の買い替え費用（万円）", value=200, step=1) * 10000
+            car_first_purchase_age = st.number_input("次回購入する本人の年齢", min_value=current_age, max_value=90, value=current_age, step=1)
+            car_first_purchase_cost = st.number_input("次回の購入費用（万円）", value=300, step=10) * 10000
+            car_replace_cycle = st.number_input("買い替え周期（年）", min_value=3, max_value=20, value=7, step=1)
+            car_replace_cost = st.number_input("それ以降の買い替え費用（万円）", value=200, step=10) * 10000
             car_loan_use = st.checkbox("自動車購入時にローンを利用する", key="car_loan_main")
             if car_loan_use:
-                car_loan_rate = st.slider("自動車ローン金利(%)", 0.1, 10.0, 2.0, step=0.1) / 100
-                car_loan_years = st.slider("自動車ローン返済期間(年)", 1, 10, 5)
+                car_loan_rate = st.number_input("自動車ローン金利(%)", min_value=0.1, max_value=10.0, value=2.0, step=0.1) / 100
+                car_loan_years = st.number_input("自動車ローン返済期間(年)", min_value=1, max_value=10, value=5, step=1)
             else:
                 car_loan_rate = car_loan_years = 0
-            car_last_purchase_age = st.slider("最後に車を買い替える年齢(本人)", 60, 100, 75)
-            car_dispose_age = st.slider("車を手放す(免返等)年齢(本人)", car_last_purchase_age, 100, min(100, car_last_purchase_age + 10))
-            car_sale_price = st.number_input("最後に手放す際の売却見込額(万円)", value=50, step=1) * 10000
+            car_last_purchase_age = st.number_input("最後に車を買い替える年齢(本人)", min_value=60, max_value=100, value=75, step=1)
+            car_dispose_age = st.number_input("車を手放す(免返等)年齢(本人)", min_value=car_last_purchase_age, max_value=100, value=min(100, car_last_purchase_age + 10), step=1)
+            car_sale_price = st.number_input("最後に手放す際の売却見込額(万円)", value=50, step=10) * 10000
             car_maint_annual = st.number_input("年間維持費(駐車場等含)（万円/年）", value=30, step=1) * 10000
         else:
             car_first_purchase_age = car_first_purchase_cost = car_replace_cycle = car_replace_cost = car_last_purchase_age = car_dispose_age = car_maint_annual = 0
@@ -612,19 +624,19 @@ with tabs[3]:
         if has_marriage:
             sp_has_car = st.checkbox("配偶者用の車の所有・購入あり", value=False)
             if sp_has_car:
-                sp_car_first_purchase_age = st.slider("次回購入する配偶者の年齢", current_age + sp_age_diff, 90, current_age + sp_age_diff)
-                sp_car_first_purchase_cost = st.number_input("次回の配偶者の購入費用（万円）", value=200, step=1) * 10000
-                sp_car_replace_cycle = st.slider("配偶者の買い替え周期（年）", 3, 20, 7)
-                sp_car_replace_cost = st.number_input("それ以降の配偶者の買い替え費用（万円）", value=150, step=1) * 10000
+                sp_car_first_purchase_age = st.number_input("次回購入する配偶者の年齢", min_value=current_age + sp_age_diff, max_value=90, value=current_age + sp_age_diff, step=1)
+                sp_car_first_purchase_cost = st.number_input("次回の配偶者の購入費用（万円）", value=200, step=10) * 10000
+                sp_car_replace_cycle = st.number_input("配偶者の買い替え周期（年）", min_value=3, max_value=20, value=7, step=1)
+                sp_car_replace_cost = st.number_input("それ以降の配偶者の買い替え費用（万円）", value=150, step=10) * 10000
                 sp_car_loan_use = st.checkbox("配偶者の自動車購入時にローンを利用する", key="car_loan_sp")
                 if sp_car_loan_use:
-                    sp_car_loan_rate = st.slider("配偶者の自動車ローン金利(%)", 0.1, 10.0, 2.0, step=0.1) / 100
-                    sp_car_loan_years = st.slider("配偶者の自動車ローン返済期間(年)", 1, 10, 5)
+                    sp_car_loan_rate = st.number_input("配偶者の自動車ローン金利(%)", min_value=0.1, max_value=10.0, value=2.0, step=0.1) / 100
+                    sp_car_loan_years = st.number_input("配偶者の自動車ローン返済期間(年)", min_value=1, max_value=10, value=5, step=1)
                 else:
                     sp_car_loan_rate = sp_car_loan_years = 0
-                sp_car_last_purchase_age = st.slider("最後に車を買い替える年齢(配偶者)", 60, 100, 75)
-                sp_car_dispose_age = st.slider("車を手放す年齢(配偶者)", sp_car_last_purchase_age, 100, min(100, sp_car_last_purchase_age + 10))
-                sp_car_sale_price = st.number_input("配偶者の最後に手放す際の売却見込額(万円)", value=30, step=1) * 10000
+                sp_car_last_purchase_age = st.number_input("最後に車を買い替える年齢(配偶者)", min_value=60, max_value=100, value=75, step=1)
+                sp_car_dispose_age = st.number_input("車を手放す年齢(配偶者)", min_value=sp_car_last_purchase_age, max_value=100, value=min(100, sp_car_last_purchase_age + 10), step=1)
+                sp_car_sale_price = st.number_input("配偶者の最後に手放す際の売却見込額(万円)", value=30, step=10) * 10000
                 sp_car_maint_annual = st.number_input("配偶者の年間維持費（万円/年）", value=20, step=1) * 10000
             else:
                 sp_car_first_purchase_age = sp_car_first_purchase_cost = sp_car_replace_cycle = sp_car_replace_cost = sp_car_last_purchase_age = sp_car_dispose_age = sp_car_maint_annual = 0
@@ -650,15 +662,15 @@ with tabs[4]:
         has_investment = st.checkbox("新規の積立投資を行う(本人)", value=True)
         if has_investment:
             invest_monthly = st.number_input("毎月の積立額(本人・万円)", value=5, step=1) * 10000
-            invest_end_age = st.slider("積立を終了する本人の年齢", current_age, 100, 60)
+            invest_end_age = st.number_input("積立を終了する本人の年齢", min_value=current_age, max_value=100, value=60, step=1)
             invest_strategy = st.radio("積立の優先順位(本人)", ["NISA優先 (年間360万/生涯1800万上限、超過分は特定口座)", "すべて特定口座へ"])
         else:
             invest_monthly = invest_end_age = 0
             invest_strategy = "すべて特定口座へ"
             
-        withdrawal_start_age = st.slider("定率取り崩し開始年齢(本人)", current_age, 100, retirement_age)
-        withdrawal_rate_nisa = st.slider("NISA 定率取り崩し率(本人) (%)", 0.0, 10.0, 4.0, step=0.1) / 100
-        withdrawal_rate_taxable = st.slider("特定口座 定率取り崩し率(本人) (%)", 0.0, 10.0, 4.0, step=0.1) / 100
+        withdrawal_start_age = st.number_input("定率取り崩し開始年齢(本人)", min_value=current_age, max_value=100, value=retirement_age, step=1)
+        withdrawal_rate_nisa = st.number_input("NISA 定率取り崩し率(本人) (%)", min_value=0.0, max_value=10.0, value=4.0, step=0.1) / 100
+        withdrawal_rate_taxable = st.number_input("特定口座 定率取り崩し率(本人) (%)", min_value=0.0, max_value=10.0, value=4.0, step=0.1) / 100
 
     with col2:
         st.subheader("配偶者")
@@ -672,15 +684,15 @@ with tabs[4]:
             sp_has_investment = st.checkbox("新規の積立投資を行う(配偶者)", value=False)
             if sp_has_investment:
                 sp_invest_monthly = st.number_input("毎月の積立額(配偶者・万円)", value=3, step=1) * 10000
-                sp_invest_end_age = st.slider("積立を終了する配偶者の年齢", current_age + sp_age_diff, 100, 60)
+                sp_invest_end_age = st.number_input("積立を終了する配偶者の年齢", min_value=current_age + sp_age_diff, max_value=100, value=60, step=1)
                 sp_invest_strategy = st.radio("積立の優先順位(配偶者)", ["NISA優先", "すべて特定口座へ"])
             else:
                 sp_invest_monthly = sp_invest_end_age = 0
                 sp_invest_strategy = "すべて特定口座へ"
                 
-            sp_withdrawal_start_age = st.slider("定率取り崩し開始年齢(配偶者)", current_age + sp_age_diff, 100, sp_retirement_age)
-            sp_withdrawal_rate_nisa = st.slider("NISA 定率取り崩し率(配偶者) (%)", 0.0, 10.0, 4.0, step=0.1) / 100
-            sp_withdrawal_rate_taxable = st.slider("特定口座 定率取り崩し率(配偶者) (%)", 0.0, 10.0, 4.0, step=0.1) / 100
+            sp_withdrawal_start_age = st.number_input("定率取り崩し開始年齢(配偶者)", min_value=current_age + sp_age_diff, max_value=100, value=sp_retirement_age, step=1)
+            sp_withdrawal_rate_nisa = st.number_input("NISA 定率取り崩し率(配偶者) (%)", min_value=0.0, max_value=10.0, value=4.0, step=0.1) / 100
+            sp_withdrawal_rate_taxable = st.number_input("特定口座 定率取り崩し率(配偶者) (%)", min_value=0.0, max_value=10.0, value=4.0, step=0.1) / 100
         else:
             sp_initial_savings = sp_initial_nisa = sp_initial_taxable = sp_nisa_used_tsumitate = sp_nisa_used_growth = 0
             sp_has_investment = False
@@ -689,8 +701,8 @@ with tabs[4]:
             sp_withdrawal_start_age = sp_withdrawal_rate_nisa = sp_withdrawal_rate_taxable = 0
 
     st.divider()
-    nisa_return = st.slider("NISA期待リターン (%)", 0.0, 10.0, 6.0, step=0.1) / 100
-    taxable_return_base = st.slider("特定口座ベースリターン (%)", 0.0, 10.0, 6.0, step=0.1) / 100
+    nisa_return = st.number_input("NISA期待リターン (%)", min_value=0.0, max_value=10.0, value=6.0, step=0.1) / 100
+    taxable_return_base = st.number_input("特定口座ベースリターン (%)", min_value=0.0, max_value=10.0, value=6.0, step=0.1) / 100
     st.caption("※簡易計算のため、特定口座の複利運用は毎年課税（税引後リターン適用）されている前提で算出します。")
     min_savings_amount = st.number_input("預貯金の最低維持額(世帯合計・万円)", value=150, step=10) * 10000
     deficit_order = st.selectbox("赤字補填の優先順位", [
@@ -707,13 +719,13 @@ with tabs[5]:
     with col_pen1:
         st.markdown("**本人の公的年金**")
         pension_base = st.number_input("65歳時の年金見込額(額面・万円)(本人)", value=240, step=10) * 10000
-        pension_start_age = st.slider("年金受給開始年齢(本人)", 60, 75, 65)
+        pension_start_age = st.number_input("年金受給開始年齢(本人)", min_value=60, max_value=75, value=65, step=1)
         
     with col_pen2:
         if has_marriage:
             st.markdown("**配偶者の公的年金**")
             sp_pension_base = st.number_input("65歳時の年金見込額(額面・万円)(配偶者)", value=120, step=10) * 10000
-            sp_pension_start_age = st.slider("年金受給開始年齢(配偶者)", 60, 75, 65)
+            sp_pension_start_age = st.number_input("年金受給開始年齢(配偶者)", min_value=60, max_value=75, value=65, step=1)
             
             has_kakyu_nenkin = st.checkbox("加給年金の受給あり")
             if has_kakyu_nenkin:
@@ -736,19 +748,19 @@ with tabs[5]:
             edu_pay_type = st.radio("払込状況(学資)", ["積立中（分割払い）", "一時払い（これから支払う）"])
             if edu_pay_type == "積立中（分割払い）":
                 edu_monthly = st.number_input("毎月の積立額(学資・万円)", value=1.5, step=0.1) * 10000
-                edu_pay_start_age = st.slider("支払いを開始した年齢(学資)", 20, current_age, 35)
-                edu_pay_end_age = st.slider("払込終了年齢(学資)", current_age, 80, 55)
+                edu_pay_start_age = st.number_input("支払いを開始した年齢(学資)", min_value=20, max_value=current_age, value=35, step=1)
+                edu_pay_end_age = st.number_input("払込終了年齢(学資)", min_value=current_age, max_value=80, value=55, step=1)
                 edu_pay_age = edu_lump_pay = 0
             else:
-                edu_pay_age = st.slider("支払う年齢(学資)", current_age, 80, current_age)
+                edu_pay_age = st.number_input("支払う年齢(学資)", min_value=current_age, max_value=80, value=current_age, step=1)
                 edu_lump_pay = st.number_input("支払金額(一時払・学資・万円)", value=200, step=10) * 10000
                 edu_monthly = edu_pay_end_age = edu_pay_start_age = 0
 
-            edu_return_rate = st.slider("見込利率(学資・年利%)", 0.0, 10.0, 1.0, step=0.1) / 100
+            edu_return_rate = st.number_input("見込利率(学資・年利%)", min_value=0.0, max_value=10.0, value=1.0, step=0.1) / 100
             edu_receive_type = st.radio("受取方法(学資)", ["一時金（一括）", "年金（分割）"])
-            edu_receive_age = st.slider("受取開始年齢(学資)", current_age, 80, 55)
+            edu_receive_age = st.number_input("受取開始年齢(学資)", min_value=current_age, max_value=80, value=55, step=1)
             if edu_receive_type == "年金（分割）":
-                edu_receive_years = st.slider("受取期間(学資・年)", 1, 20, 4)
+                edu_receive_years = st.number_input("受取期間(学資・年)", min_value=1, max_value=20, value=4, step=1)
             else:
                 edu_receive_years = 0
                 
@@ -783,19 +795,19 @@ with tabs[5]:
             life_pay_type = st.radio("払込状況(生命)", ["積立中（分割払い）", "一時払い（これから支払う）"])
             if life_pay_type == "積立中（分割払い）":
                 life_monthly = st.number_input("毎月の積立額(生命・万円)", value=2.0, step=0.1) * 10000
-                life_pay_start_age = st.slider("支払いを開始した年齢(生命)", 20, current_age, 35)
-                life_pay_end_age = st.slider("払込終了年齢(生命)", current_age, 80, 60)
+                life_pay_start_age = st.number_input("支払いを開始した年齢(生命)", min_value=20, max_value=current_age, value=35, step=1)
+                life_pay_end_age = st.number_input("払込終了年齢(生命)", min_value=current_age, max_value=80, value=60, step=1)
                 life_pay_age = life_lump_pay = 0
             else:
-                life_pay_age = st.slider("支払う年齢(生命)", current_age, 80, current_age)
+                life_pay_age = st.number_input("支払う年齢(生命)", min_value=current_age, max_value=80, value=current_age, step=1)
                 life_lump_pay = st.number_input("支払金額(一時払・生命・万円)", value=300, step=10) * 10000
                 life_monthly = life_pay_end_age = life_pay_start_age = 0
 
-            life_return_rate = st.slider("見込利率(生命・年利%)", 0.0, 10.0, 1.0, step=0.1) / 100
+            life_return_rate = st.number_input("見込利率(生命・年利%)", min_value=0.0, max_value=10.0, value=1.0, step=0.1) / 100
             life_receive_type = st.radio("受取方法(生命)", ["一時金（一括）", "年金（分割）"])
-            life_receive_age = st.slider("受取開始/満期年齢(生命)", current_age, 80, 60)
+            life_receive_age = st.number_input("受取開始/満期年齢(生命)", min_value=current_age, max_value=80, value=60, step=1)
             if life_receive_type == "年金（分割）":
-                life_receive_years = st.slider("受取期間(生命・年)", 1, 20, 10)
+                life_receive_years = st.number_input("受取期間(生命・年)", min_value=1, max_value=20, value=10, step=1)
             else:
                 life_receive_years = 0
                 
@@ -828,12 +840,12 @@ with tabs[5]:
         has_personal_pension = st.checkbox("個人年金保険あり(本人)")
         if has_personal_pension:
             pp_monthly = st.number_input("個人年金の毎月の積立額(万円)", value=1.0, step=0.1) * 10000
-            pp_pay_start_age = st.slider("支払いを開始した年齢(個人年金)", 20, current_age, 30)
-            pp_pay_end_age = st.slider("個人年金の払込終了年齢(本人)", current_age, 80, 60)
-            pp_return_rate = st.slider("見込利率(個人年金・年利%)", 0.0, 10.0, 1.0, step=0.1) / 100
+            pp_pay_start_age = st.number_input("支払いを開始した年齢(個人年金)", min_value=20, max_value=current_age, value=30, step=1)
+            pp_pay_end_age = st.number_input("個人年金の払込終了年齢(本人)", min_value=current_age, max_value=80, value=60, step=1)
+            pp_return_rate = st.number_input("見込利率(個人年金・年利%)", min_value=0.0, max_value=10.0, value=1.0, step=0.1) / 100
             
-            pp_receive_start_age = st.slider("個人年金の受取開始年齢(本人)", 60, 80, 60)
-            pp_receive_years = st.slider("個人年金の受取期間(年)", 5, 20, 10)
+            pp_receive_start_age = st.number_input("個人年金の受取開始年齢(本人)", min_value=60, max_value=80, value=60, step=1)
+            pp_receive_years = st.number_input("個人年金の受取期間(年)", min_value=5, max_value=20, value=10, step=1)
             
             pp_invest_years = max(0, pp_pay_end_age - pp_pay_start_age)
             pp_total_paid = (pp_monthly * 12) * pp_invest_years
@@ -855,13 +867,13 @@ with tabs[5]:
         if has_ideco:
             ideco_balance_init = st.number_input("iDeCo現在の残高(本人・万円)", value=100, step=10) * 10000
             ideco_monthly = st.number_input("iDeCo毎月の積立額(本人・万円)", value=2.3, step=0.1) * 10000
-            ideco_start_age = st.slider("iDeCo加入年齢（本人）", 20, current_age, 30)
-            ideco_receipt_age = st.slider("iDeCo受取開始年齢(本人)", 60, 75, 60)
+            ideco_start_age = st.number_input("iDeCo加入年齢（本人）", min_value=20, max_value=current_age, value=30, step=1)
+            ideco_receipt_age = st.number_input("iDeCo受取開始年齢(本人)", min_value=60, max_value=75, value=60, step=1)
             if ideco_receipt_age > retirement_age:
                 ideco_post_retirement_monthly = st.number_input("退職後のiDeCo積立額(本人・万円/月)", value=0.0, step=0.1, help="退職〜受取開始までの掛金") * 10000
             else:
                 ideco_post_retirement_monthly = ideco_monthly
-            ideco_return = st.slider("iDeCo期待リターン(本人・%)", 0.0, 10.0, 3.0, step=0.1) / 100
+            ideco_return = st.number_input("iDeCo期待リターン(本人・%)", min_value=0.0, max_value=10.0, value=3.0, step=0.1) / 100
             ideco_receipt_type = st.radio("iDeCo受取方法(本人)", ["一時金", "年金(10年分割)"])
             if ideco_receipt_type == "一時金":
                 ideco_lump_dest = st.radio("iDeCo一時金の入金先(本人)", ["預貯金へ", "NISA枠優先 (あふれた分は特定口座へ)", "特定口座へ(運用継続)"], index=1)
@@ -877,7 +889,7 @@ with tabs[5]:
         if has_dc:
             dc_balance_init = st.number_input("DC現在の残高(本人・万円)", value=200, step=10) * 10000
             dc_monthly = st.number_input("DC毎月の会社拠出等(本人・万円)", value=1.0, step=0.1) * 10000
-            dc_return = st.slider("DC期待リターン(本人・%)", 0.0, 10.0, 3.0, step=0.1) / 100
+            dc_return = st.number_input("DC期待リターン(本人・%)", min_value=0.0, max_value=10.0, value=3.0, step=0.1) / 100
         else:
             dc_balance_init = dc_monthly = dc_return = 0
 
@@ -887,13 +899,13 @@ with tabs[5]:
             if has_sp_ideco:
                 sp_ideco_balance_init = st.number_input("iDeCo現在の残高(配偶者・万円)", value=50, step=10) * 10000
                 sp_ideco_monthly = st.number_input("iDeCo毎月の積立額(配偶者・万円)", value=2.3, step=0.1) * 10000
-                sp_ideco_start_age = st.slider("iDeCo加入年齢（配偶者）", 20, current_age, 30)
-                sp_ideco_receipt_age = st.slider("iDeCo受取開始年齢(配偶者)", 60, 75, 60)
+                sp_ideco_start_age = st.number_input("iDeCo加入年齢（配偶者）", min_value=20, max_value=current_age, value=30, step=1)
+                sp_ideco_receipt_age = st.number_input("iDeCo受取開始年齢(配偶者)", min_value=60, max_value=75, value=60, step=1)
                 if sp_ideco_receipt_age > sp_retirement_age:
                     sp_ideco_post_retirement_monthly = st.number_input("退職後のiDeCo積立額(配偶者・万円/月)", value=0.0, step=0.1, help="退職〜受取開始までの掛金") * 10000
                 else:
                     sp_ideco_post_retirement_monthly = sp_ideco_monthly
-                sp_ideco_return = st.slider("iDeCo期待リターン(配偶者・%)", 0.0, 10.0, 3.0, step=0.1) / 100
+                sp_ideco_return = st.number_input("iDeCo期待リターン(配偶者・%)", min_value=0.0, max_value=10.0, value=3.0, step=0.1) / 100
                 sp_ideco_receipt_type = st.radio("iDeCo受取方法(配偶者)", ["一時金", "年金(10年分割)"])
                 if sp_ideco_receipt_type == "一時金":
                     sp_ideco_lump_dest = st.radio("iDeCo一時金の入金先(配偶者)", ["預貯金へ", "NISA枠優先 (あふれた分は特定口座へ)", "特定口座へ(運用継続)"], index=1)
@@ -909,7 +921,7 @@ with tabs[5]:
             if has_sp_dc:
                 sp_dc_balance_init = st.number_input("DC現在の残高(配偶者・万円)", value=100, step=10) * 10000
                 sp_dc_monthly = st.number_input("DC毎月の会社拠出等(配偶者・万円)", value=1.0, step=0.1) * 10000
-                sp_dc_return = st.slider("DC期待リターン(配偶者・%)", 0.0, 10.0, 3.0, step=0.1) / 100
+                sp_dc_return = st.number_input("DC期待リターン(配偶者・%)", min_value=0.0, max_value=10.0, value=3.0, step=0.1) / 100
             else:
                 sp_dc_balance_init = sp_dc_monthly = sp_dc_return = 0
         else:
@@ -942,9 +954,9 @@ with tabs[6]:
         base_expense = st.number_input("現在の基本生活費(全年代一律・万円/年)", value=250, step=10) * 10000
         base_exp_20s = base_exp_30s = base_exp_40s = base_exp_50s = base_exp_60s = base_exp_70s_plus = 0
         
-    inflation_rate = st.slider("インフレ率 (%)", 0.0, 5.0, 1.5, step=0.1) / 100
-    future_tax_rate = st.slider("将来の金融課税率 (%)", 20.0, 50.0, 20.0, step=1.0) / 100
-    tax_change_age = st.slider("増税される本人の年齢", current_age, 80, current_age + 10)
+    inflation_rate = st.number_input("インフレ率 (%)", min_value=0.0, max_value=5.0, value=1.5, step=0.1) / 100
+    future_tax_rate = st.number_input("将来の金融課税率 (%)", min_value=20.0, max_value=50.0, value=20.0, step=1.0) / 100
+    tax_change_age = st.number_input("増税される本人の年齢", min_value=current_age, max_value=80, value=current_age + 10, step=1)
 
     st.markdown("---")
     st.subheader("不定期なライフイベント（特別支出）")
@@ -965,7 +977,7 @@ with tabs[7]:
         st.subheader("本人")
         has_nursing_home = st.checkbox("本人の入居予定あり")
         if has_nursing_home:
-            nh_entry_age = st.slider("入居する年齢(本人)", 60, 100, 80)
+            nh_entry_age = st.number_input("入居する年齢(本人)", min_value=60, max_value=100, value=80, step=1)
             nh_lump_sum = st.number_input("入居時費用（一時金・万円）(本人)", value=500, step=10) * 10000
             nh_monthly = st.number_input("月額費用（万円/月）(本人)", value=15, step=1) * 10000
             nh_base_expense_adjustment = st.number_input("入居後の基本生活費(万円/年)(本人)", value=120, step=10) * 10000
@@ -978,7 +990,7 @@ with tabs[7]:
         if has_marriage:
             sp_has_nursing_home = st.checkbox("配偶者の入居予定あり")
             if sp_has_nursing_home:
-                sp_nh_entry_age = st.slider("入居する年齢(配偶者)", 60, 100, 80)
+                sp_nh_entry_age = st.number_input("入居する年齢(配偶者)", min_value=60, max_value=100, value=80, step=1)
                 sp_nh_lump_sum = st.number_input("入居時費用（一時金・万円）(配偶者)", value=500, step=10) * 10000
                 sp_nh_monthly = st.number_input("月額費用（万円/月）(配偶者)", value=15, step=1) * 10000
                 sp_nh_base_expense_adjustment = st.number_input("入居後の基本生活費(万円/年)(配偶者)", value=120, step=10) * 10000
@@ -1055,8 +1067,6 @@ try:
     balances_taxable = np.zeros(years_count)
     balances_ideco_dc = np.zeros(years_count)
     total_assets = np.zeros(years_count)
-
-    is_depleted = False
     
     current_rent_annual = rent_annual
     last_rent_update_year = 0
@@ -1651,7 +1661,7 @@ try:
                         if not use_edu_loan:
                             exp_edu += edu_cost
                             
-            if child["uni_support"]["active"] and 19 <= c_age <= 22:
+            if child["uni_support"]["active"] and child["uni_support"]["start"] <= c_age <= child["uni_support"]["end"]:
                 normal_exp_house += (child["uni_support"]["rent"] * 12)
                 exp_base += (child["uni_support"]["living"] * 12)
                             
@@ -1691,12 +1701,15 @@ try:
         if has_home_sale:
             if home_sale_trigger == "本人が入居した年" and age == nh_entry_age:
                 calc_savings += home_sale_price
+                lump_sum_income_this_year += home_sale_price
             elif home_sale_trigger == "配偶者が入居した年" and sp_age == sp_nh_entry_age:
                 calc_savings += home_sale_price
+                lump_sum_income_this_year += home_sale_price
             elif home_sale_trigger == "遅い方（二人とも入居した時点）":
                 target_year = max(nh_entry_age if has_nursing_home else 0, sp_nh_entry_age if sp_has_nursing_home else 0)
                 if age == target_year or (sp_age == target_year and not has_nursing_home):
                     calc_savings += home_sale_price
+                    lump_sum_income_this_year += home_sale_price
             
         if has_car and age == car_dispose_age and car_sale_price > 0:
             calc_savings += car_sale_price
@@ -1705,6 +1718,36 @@ try:
         if has_marriage and sp_has_car and sp_age == sp_car_dispose_age and sp_car_sale_price > 0:
             calc_savings += sp_car_sale_price
             lump_sum_income_this_year += sp_car_sale_price
+            
+        if ret_net_main > 0:
+            lump_sum_income_this_year += ret_net_main
+            if ret_lump_dest == "特定口座へ(運用継続)":
+                calc_taxable += ret_net_main
+            elif ret_lump_dest == "NISA枠優先 (あふれた分は特定口座へ)":
+                nisa_room_annual = 3600000
+                nisa_room_lifetime = max(0, 18000000 - main_nisa_lifetime_invested)
+                nisa_add = min(ret_net_main, nisa_room_annual, nisa_room_lifetime)
+                taxable_add = ret_net_main - nisa_add
+                calc_nisa += nisa_add
+                calc_taxable += taxable_add
+                main_nisa_lifetime_invested += nisa_add
+            else:
+                calc_savings += ret_net_main
+                
+        if ret_net_sp > 0:
+            lump_sum_income_this_year += ret_net_sp
+            if sp_ret_lump_dest == "特定口座へ(運用継続)":
+                calc_taxable += ret_net_sp
+            elif sp_ret_lump_dest == "NISA枠優先 (あふれた分は特定口座へ)":
+                nisa_room_annual = 3600000
+                nisa_room_lifetime = max(0, 18000000 - sp_nisa_lifetime_invested)
+                nisa_add = min(ret_net_sp, nisa_room_annual, nisa_room_lifetime)
+                taxable_add = ret_net_sp - nisa_add
+                calc_nisa += nisa_add
+                calc_taxable += taxable_add
+                sp_nisa_lifetime_invested += nisa_add
+            else:
+                calc_savings += ret_net_sp
         
         if ideco_lump_net_main > 0:
             lump_sum_income_this_year += ideco_lump_net_main
@@ -1810,39 +1853,9 @@ try:
                 calc_savings += take
                 shortfall -= take
 
-        current_total_assets = calc_nisa + calc_taxable + calc_savings + curr_ideco_balance + curr_dc_balance + curr_sp_ideco_balance + curr_sp_dc_balance
-        if current_total_assets <= 0 or (shortfall > 0 and (calc_nisa + calc_taxable + calc_savings) <= 0):
-            is_depleted = True
-        
-        if is_depleted:
-            arr_debt_housing[i] = arr_debt_housing[i-1] * (1 + housing_loan_rate) if i > 0 else arr_debt_housing[i]
-            arr_debt_car[i] = arr_debt_car[i-1] * (1 + car_loan_rate) if i > 0 else arr_debt_car[i]
-            arr_debt_reform[i] = arr_debt_reform[i-1] * (1 + reform_loan_rate) if i > 0 else arr_debt_reform[i]
-            arr_debt_edu[i] = arr_debt_edu[i-1] * (1 + edu_loan_rate) if i > 0 else arr_debt_edu[i]
-            arr_debt_balance[i] = arr_debt_housing[i] + arr_debt_car[i] + arr_debt_reform[i] + arr_debt_edu[i]
-            
-            arr_exp_house[i] -= (arr_reform_loan_pmts[i] + h_pmt_this_year)
-            arr_exp_car[i] -= arr_car_loan_pmts[i]
-            arr_exp_edu[i] -= arr_edu_loan_pmts[i]
-            
-            arr_annual_balance[i] = 0
-            arr_net_income[i] = 0
-            arr_total_exp[i] = 0
-            arr_car_loan_pmts[i] = 0
-            arr_edu_loan_pmts[i] = 0
-            arr_reform_loan_pmts[i] = 0
-            
-            calc_nisa = 0
-            calc_taxable = 0
-            calc_savings = 0
-            curr_ideco_balance = 0
-            curr_dc_balance = 0
-            curr_sp_ideco_balance = 0
-            curr_sp_dc_balance = 0
-
         balances_nisa[i] = max(0, calc_nisa)
         balances_taxable[i] = max(0, calc_taxable)
-        balances_savings[i] = max(0, calc_savings) 
+        balances_savings[i] = calc_savings
         balances_ideco_dc[i] = max(0, curr_ideco_balance + curr_dc_balance + curr_sp_ideco_balance + curr_sp_dc_balance)
         total_assets[i] = balances_savings[i] + balances_nisa[i] + balances_taxable[i] + balances_ideco_dc[i]
         
@@ -1864,7 +1877,7 @@ try:
     with col2:
         st.markdown(f'<div class="metric-card"><div class="metric-title">85歳時点の純資産(ローン控除後)</div><div class="metric-value">{(total_assets[ages.index(85) if 85 in ages else -1] - arr_debt_balance[ages.index(85) if 85 in ages else -1])/10000:,.1f}万円</div></div>', unsafe_allow_html=True)
     with col3:
-        total_ret = sum([arr_net_income[i] for i, a in enumerate(ages) if a >= retirement_age])
+        total_ret = sum([arr_net_income[i] + arr_lump_sum_income[i] for i, a in enumerate(ages) if a >= retirement_age])
         st.markdown(f'<div class="metric-card"><div class="metric-title">退職後の世帯累計手取り</div><div class="metric-value">{total_ret/10000:,.1f}万円</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1875,7 +1888,7 @@ try:
             {"段階": "小学校", "公立": EDU_COST["小学校(公立)"], "私立": EDU_COST["小学校(私立)"]},
             {"段階": "中学校", "公立": EDU_COST["中学校(公立)"], "私立": EDU_COST["中学校(私立)"]},
             {"段階": "高校", "公立": EDU_COST["高校(公立)"], "私立": EDU_COST["高校(私立)"]},
-            {"段階": "大学", "公立": EDU_COST["大学(国公立)"], "私立": f'文系:{EDU_COST["大学(私立文系)"]} / 理系:{EDU_COST["大学(私立理系)"]}'}
+            {"段階": "進学先", "国公立大学": EDU_COST["国公立大学(4年)"], "私立": f'文系:{EDU_COST["私立大学文系(4年)"]} / 理系:{EDU_COST["私立大学理系(4年)"]} / 短大・専門:{EDU_COST["短大(2年)"]}'}
         ]).set_index("段階"))
 
     st.markdown("### 📈 資産推移と年間収支 (単位：万円)")
@@ -1890,9 +1903,8 @@ try:
     st.markdown("### 📋 世帯キャッシュフロー表 (単位: 万円)")
     df = pd.DataFrame({
         '本人年齢': ages,
-        '世帯手取り収入': arr_net_income / 10000,
-        '退職金(手取り)': arr_ret_income / 10000,
-        '一時収入(iDeCo等)': arr_lump_sum_income / 10000,
+        '世帯手取り収入(経常)': arr_net_income / 10000,
+        '一時収入(退職金・家等)': arr_lump_sum_income / 10000,
         '育休給付金': arr_leave_benefit / 10000,
         '児童手当': arr_child_allowance / 10000,
         '資産取崩': arr_withdrawal_amount / 10000,
@@ -1908,7 +1920,7 @@ try:
         '所得税(世帯)': (arr_inc_tax + arr_sp_inc_tax) / 10000,
         '住民税(世帯)': (arr_res_tax + arr_sp_res_tax) / 10000,
         '退職関連税(世帯)': (arr_ret_inc_tax + arr_ret_res_tax) / 10000,
-        '世帯年間収支': arr_annual_balance / 10000,
+        '世帯年間収支(経常)': arr_annual_balance / 10000,
         '住宅ローン残高': arr_debt_housing / 10000,
         '自動車ローン残高': arr_debt_car / 10000,
         'リフォームローン残高': arr_debt_reform / 10000,
@@ -1924,9 +1936,9 @@ try:
 
     style_func = lambda x: 'color: red' if isinstance(x, (int, float)) and x < 0 else ''
     try:
-        st.dataframe(df.style.format("{:.1f}").map(style_func, subset=['世帯年間収支', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額']), height=400, use_container_width=True)
+        st.dataframe(df.style.format("{:.1f}").map(style_func, subset=['世帯年間収支(経常)', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額']), height=400, use_container_width=True)
     except AttributeError:
-        st.dataframe(df.style.format("{:.1f}").applymap(style_func, subset=['世帯年間収支', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額']), height=400, use_container_width=True)
+        st.dataframe(df.style.format("{:.1f}").applymap(style_func, subset=['世帯年間収支(経常)', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額']), height=400, use_container_width=True)
 
     # --- アフィリエイト・ネクストアクション エリア ---
     st.markdown("---")
