@@ -9,7 +9,7 @@ import base64
 import zlib
 
 # --- Page Config ---
-st.set_page_config(page_title="FPライフプランシミュレータ", layout="wide")
+st.set_page_config(page_title="最強ライフプランシミュレータ",page_icon="📊", layout="wide")
 
 # --- CSS Styling ---
 st.markdown("""
@@ -175,14 +175,83 @@ def get_ret_deduction(years):
     if years <= 20: return max(800000, 400000 * max(1, years))
     else: return 8000000 + 700000 * (years - 20)
 
-def calc_ret_tax(gross_amount, years, prior_deduction=0):
-    deduction = get_ret_deduction(years)
-    net_deduction = max(0, deduction - prior_deduction) 
-    taxable = max(0, (gross_amount - net_deduction) / 2)
+def calc_retirement_tax_with_rules(current_event, past_events, person_name="本人"):
+    amount = current_event["amount"]
+    years_current = max(1, current_event["end"] - current_event["start"])
+    base_deduction = get_ret_deduction(years_current)
+    
+    adjusted_deduction = base_deduction
+    apply_adjustment = False
+    overlap_years = 0
+    
+    for past in past_events:
+        years_diff = current_event["age"] - past["age"]
+        if years_diff <= 0: continue
+            
+        is_ideco_current = (current_event["type"] == "ideco")
+        is_ideco_past = (past["type"] == "ideco")
+        
+        if is_ideco_past and not is_ideco_current and years_diff <= 4: apply_adjustment = True
+        elif not is_ideco_past and is_ideco_current and years_diff <= 19: apply_adjustment = True
+        elif not is_ideco_past and not is_ideco_current and years_diff <= 4: apply_adjustment = True
+        
+        if apply_adjustment:
+            overlap_start = max(current_event["start"], past["start"])
+            overlap_end = min(current_event["end"], past["end"])
+            overlap_years = max(0, overlap_end - overlap_start)
+            if overlap_years > 0:
+                adjusted_deduction -= get_ret_deduction(overlap_years)
+                
+    net_deduction = max(0, adjusted_deduction)
+    taxable = max(0, (amount - net_deduction) / 2)
     inc_tax = calc_income_tax(taxable)
     res_tax = taxable * 0.10
-    return inc_tax, res_tax, net_deduction
+    
+    calc_formula = f"基本枠:{base_deduction/10000:,.1f}万"
+    if apply_adjustment and overlap_years > 0:
+        rule_name = "5年ルール" if (current_event["type"] != "ideco") else "19年ルール"
+        calc_formula += f" ({rule_name}適用: 重複{overlap_years}年分 -{get_ret_deduction(overlap_years)/10000:,.1f}万減額)"
 
+    detail = {
+        "受取人": person_name,
+        "年齢": current_event["age"],
+        "種類": "iDeCo" if current_event["type"] == "ideco" else "会社退職金",
+        "額面金額": f"{amount/10000:,.1f}万円",
+        "対象年数": f"{years_current}年",
+        "控除計算式・重複調整": calc_formula,
+        "適用控除額": f"{net_deduction/10000:,.1f}万円",
+        "課税対象": f"{taxable/10000:,.1f}万円",
+        "税額(所得+住民)": f"{(inc_tax + res_tax)/10000:,.1f}万円",
+        "手取り額": f"{(amount - inc_tax - res_tax)/10000:,.1f}万円"
+    }
+    return inc_tax, res_tax, detail
+
+def calc_same_year_retirement_tax(events, person_name="本人"):
+    total_amount = sum(e["amount"] for e in events)
+    min_start = min(e["start"] for e in events)
+    max_end = max(e["end"] for e in events)
+    years = max(1, max_end - min_start)
+    
+    deduction = get_ret_deduction(years)
+    taxable = max(0, (total_amount - deduction) / 2)
+    inc_tax = calc_income_tax(taxable)
+    res_tax = taxable * 0.10
+    
+    types = " + ".join(["iDeCo" if e["type"]=="ideco" else "会社退職金" for e in events])
+    
+    detail = {
+        "受取人": person_name,
+        "年齢": events[0]["age"],
+        "種類": f"同年合算 ({types})",
+        "額面金額": f"{total_amount/10000:,.1f}万円",
+        "対象年数": f"{years}年 (合算)",
+        "控除計算式・重複調整": f"合算期間で算出 (基本枠:{deduction/10000:,.1f}万)",
+        "適用控除額": f"{deduction/10000:,.1f}万円",
+        "課税対象": f"{taxable/10000:,.1f}万円",
+        "税額(所得+住民)": f"{(inc_tax + res_tax)/10000:,.1f}万円",
+        "手取り額": f"{(total_amount - inc_tax - res_tax)/10000:,.1f}万円"
+    }
+    return inc_tax, res_tax, detail
 def calc_pension_amount(base_amount, start_age):
     if start_age == 65: return base_amount
     elif start_age > 65: return base_amount * (1 + 0.007 * ((start_age - 65) * 12))
@@ -794,17 +863,43 @@ with tabs[4]:
     sim_opts = ["定率シミュレーション（基本）", "モンテカルロシミュレーション（リスク・暴落を考慮）"]
     saved_sim = get_val("sim_mode", "定率シミュレーション（基本）")
     sim_mode = st.radio("シミュレーション方式を選択", sim_opts, index=sim_opts.index(saved_sim) if saved_sim in sim_opts else 0)
-    st.caption("※「モンテカルロ」を選択すると、設定したリスク（標準偏差）に基づくランダムな相場推移を300回シミュレーションします。")
+    st.caption("※「モンテカルロ」を選択すると、設定したリスク（標準偏差）に基づくランダムな相場推移をシミュレーションします。")
     
     st.markdown("**■ 基本リターン設定（NISA・特定口座 共通）**")
     col_ret1, col_ret2 = st.columns(2)
     with col_ret1:
-        expected_return = st.number_input("期待リターン (%)", min_value=0.0, max_value=20.0, value=get_val("expected_return", 0.06)*100, step=0.1) / 100
+        # 初期値を株式100%想定の「8.0%」に変更
+        expected_return = st.number_input("期待リターン (%)", min_value=0.0, max_value=20.0, value=get_val("expected_return", 0.08)*100, step=0.1) / 100
     with col_ret2:
         if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
-            risk_std = st.number_input("リスク/標準偏差 (%)", min_value=0.0, max_value=50.0, value=get_val("risk_std", 0.15)*100, step=0.1) / 100
+            # 初期値を株式100%想定の「18.0%」に変更
+            risk_std = st.number_input("標準偏差/基本リスク (%)", min_value=0.0, max_value=50.0, value=get_val("risk_std", 0.18)*100, step=0.1) / 100
         else:
             risk_std = 0.0
+
+    # ▼ 追加：アプリ上で確認できる参考数値表（折りたたみ式）
+    with st.expander("📊 ポートフォリオ別のリターン・リスク入力目安表を開く"):
+        st.markdown("""
+        | 運用スタイル (資産配分) | 期待リターン (名目) | リスク (標準偏差) | 特徴 |
+        | :--- | :--- | :--- | :--- |
+        | **超積極型** (株式 100%) | **8.0 %** | **18.0 %** | 上振れも凄いが、暴落のダメージも直撃する。（★現在の初期値） |
+        | **積極型** (株式 70% / 債券等 30%) | **6.5 %** | **13.0 %** | リターンを狙いつつ、暴落時のショックをある程度和らげる王道スタイル。 |
+        | **バランス型** (株式 50% / 債券等 50%) | **5.0 %** | **10.0 %** | リスクが大きく下がるため、悲観シナリオでも資産が安定して長持ちしやすい。 |
+        | **保守型** (株式 30% / 債券等 70%) | **3.5 %** | **6.5 %** | インフレ負けを防ぐ最低限の運用。取り崩し期（老後）に入ってからの基本戦略。 |
+        """)
+            
+    if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
+        st.markdown("**■ ランダム暴落（ファットテール）設定**", help="通常の相場変動に加えて、突発的な大暴落が起こる確率と規模を設定します。0%にすると純粋な正規分布になります。")
+        col_mc1, col_mc2, col_mc3 = st.columns(3)
+        with col_mc1:
+            mc_crash_prob = st.number_input("発生確率(年率 %)", min_value=0.0, max_value=50.0, value=get_val("mc_crash_prob", 5.0), step=1.0) / 100
+        with col_mc2:
+            mc_crash_min = st.number_input("下落幅の下限(%)", min_value=0.0, max_value=99.0, value=get_val("mc_crash_min", 15.0), step=1.0) / 100
+        with col_mc3:
+            mc_crash_max = st.number_input("下落幅の上限(%)", min_value=0.0, max_value=99.0, value=get_val("mc_crash_max", 30.0), step=1.0) / 100
+    else:
+        mc_crash_prob = mc_crash_min = mc_crash_max = 0.0
+        
     st.caption("※簡易計算のため、特定口座の複利運用は毎年課税（税引後リターン適用）されている前提で算出します。")
     
     st.markdown("---")
@@ -821,13 +916,32 @@ with tabs[4]:
         shock_drop_rate = 0.0
 
     st.divider()
-    min_savings_amount = st.number_input("預貯金の最低維持額(世帯合計・万円)", value=int(get_val("min_savings_amount", 1500000)/10000), step=10) * 10000
+    st.markdown("**■ 預貯金の最低維持（温存）ライン設定**")
+    st.write("※生活防衛資金やポートフォリオの現金比率など、取り崩さずに確保しておきたい現金の目標水準を設定します。")
+    
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        min_savings_amount = st.number_input("最低維持額（定額・万円）", value=int(get_val("min_savings_amount", 1500000)/10000), step=10) * 10000
+    with col_m2:
+        min_savings_rate = st.number_input("最低維持率（総資産の %）", min_value=0.0, max_value=100.0, value=get_val("min_savings_rate", 5.0), step=1.0) / 100
+        
+    min_save_opts = ["金額が高い方を採用", "金額が低い方を採用", "定額のみを採用", "定率のみを採用"]
+    saved_min_rule = get_val("min_savings_rule", "金額が高い方を採用")
+    min_savings_rule = st.radio("維持基準の適用方法", min_save_opts, index=min_save_opts.index(saved_min_rule) if saved_min_rule in min_save_opts else 0)
+
+    st.markdown("<br>", unsafe_allow_html=True)
     def_opts = [
-        "預貯金を先に限界まで → 特定口座(世帯) → NISA(世帯)",
-        "特定口座(世帯) → NISA(世帯) → 預貯金(最低維持額割れ)",
-        "NISA(世帯) → 特定口座(世帯) → 預貯金(最低維持額割れ)"
+        "預貯金を最低維持ラインまで使う → 特定口座(世帯) → NISA(世帯)",
+        "特定口座(世帯) → NISA(世帯) → 預貯金を最低維持ラインまで使う",
+        "NISA(世帯) → 特定口座(世帯) → 預貯金を最低維持ラインまで使う"
     ]
-    saved_def = get_val("deficit_order", "預貯金を先に限界まで → 特定口座(世帯) → NISA(世帯)")
+    saved_def = get_val("deficit_order", "預貯金を最低維持ラインまで使う → 特定口座(世帯) → NISA(世帯)")
+    if "限界まで" in saved_def or "最低維持額割れ" in saved_def:
+        # 古いデータからの互換対応
+        if "特定口座(世帯) → NISA" in saved_def: saved_def = def_opts[1]
+        elif "NISA(世帯) → 特定口座" in saved_def: saved_def = def_opts[2]
+        else: saved_def = def_opts[0]
+        
     deficit_order = st.selectbox("赤字補填の優先順位", def_opts, index=def_opts.index(saved_def) if saved_def in def_opts else 0)
 
 with tabs[5]:
@@ -1076,17 +1190,18 @@ with tabs[6]:
         
         col_base1, col_base2 = st.columns(2)
         with col_base1:
-            base_exp_20s = st.number_input("20代の基本生活費(住居費除く・万円/年)", value=int(get_val("base_exp_20s", 2000000)/10000), step=10) * 10000
-            base_exp_30s = st.number_input("30代の基本生活費(住居費除く・万円/年)", value=int(get_val("base_exp_30s", 2500000)/10000), step=10) * 10000
-            base_exp_40s = st.number_input("40代の基本生活費(住居費除く・万円/年)", value=int(get_val("base_exp_40s", 3000000)/10000), step=10) * 10000
+            # 割り算せずに、保存された万円単位の数値をそのまま復元するか、初期値を設定する
+            base_exp_20s = st.number_input("20代の基本生活費(住居費除く・万円/年)", value=int(get_val("base_exp_20s", 2000000) / 10000 if get_val("base_exp_20s", 2000000) > 10000 else get_val("base_exp_20s", 200)), step=10) * 10000
+            base_exp_30s = st.number_input("30代の基本生活費(住居費除く・万円/年)", value=int(get_val("base_exp_30s", 2500000) / 10000 if get_val("base_exp_30s", 2500000) > 10000 else get_val("base_exp_30s", 250)), step=10) * 10000
+            base_exp_40s = st.number_input("40代の基本生活費(住居費除く・万円/年)", value=int(get_val("base_exp_40s", 3000000) / 10000 if get_val("base_exp_40s", 3000000) > 10000 else get_val("base_exp_40s", 300)), step=10) * 10000
         with col_base2:
-            base_exp_50s = st.number_input("50代の基本生活費(住居費除く・万円/年)", value=int(get_val("base_exp_50s", 3000000)/10000), step=10) * 10000
-            base_exp_60s = st.number_input("60代の基本生活費(住居費除く・万円/年)", value=int(get_val("base_exp_60s", 2500000)/10000), step=10) * 10000
-            base_exp_70s_plus = st.number_input("70代以降の基本生活費(住居費除く・万円/年)", value=int(get_val("base_exp_70s_plus", 2000000)/10000), step=10) * 10000
+            base_exp_50s = st.number_input("50代の基本生活費(住居費除く・万円/年)", value=int(get_val("base_exp_50s", 3000000) / 10000 if get_val("base_exp_50s", 3000000) > 10000 else get_val("base_exp_50s", 300)), step=10) * 10000
+            base_exp_60s = st.number_input("60代の基本生活費(住居費除く・万円/年)", value=int(get_val("base_exp_60s", 2500000) / 10000 if get_val("base_exp_60s", 2500000) > 10000 else get_val("base_exp_60s", 250)), step=10) * 10000
+            base_exp_70s_plus = st.number_input("70代以降の基本生活費(住居費除く・万円/年)", value=int(get_val("base_exp_70s_plus", 2000000) / 10000 if get_val("base_exp_70s_plus", 2000000) > 10000 else get_val("base_exp_70s_plus", 200)), step=10) * 10000
         
         base_expense = 0
     else:
-        base_expense = st.number_input("現在の基本生活費(全年代一律・万円/年)", value=int(get_val("base_expense", 2500000)/10000), step=10) * 10000
+        base_expense = st.number_input("現在の基本生活費(全年代一律・万円/年)", value=int(get_val("base_expense", 2500000) / 10000 if get_val("base_expense", 2500000) > 10000 else get_val("base_expense", 250)), step=10) * 10000
         base_exp_20s = base_exp_30s = base_exp_40s = base_exp_50s = base_exp_60s = base_exp_70s_plus = 0
         
     inflation_rate = st.number_input("インフレ率 (%)", min_value=0.0, max_value=5.0, value=get_val("inflation_rate", 0.015)*100, step=0.1) / 100
@@ -1113,7 +1228,22 @@ with tabs[6]:
     # ユーザーが行を追加しやすいように、空行を1つ末尾に足しておく
     default_events = pd.concat([default_events, pd.DataFrame([{"イベント名": "", "開始年齢(本人)": None, "終了年齢(本人)": None, "周期(年ごと)": None, "費用(万円)": None}])], ignore_index=True)
 
+    
     events_df = st.data_editor(default_events, num_rows="dynamic", key="events_editor")
+
+    st.markdown("---")
+    st.subheader("🛡️ 暴落時のガードレール（自動支出カット）設定")
+    st.write("相場が大きく下落した年に、自動的に生活費や特別支出を切り詰めて資産の枯渇を防ぎます。（※削れる変動費として「基本生活費」と「イベント費」にのみ適用されます）")
+    has_guardrail = st.checkbox("ガードレール機能を有効にする", value=get_val("has_guardrail", False))
+    if has_guardrail:
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            guardrail_trigger = st.number_input("発動条件: 年間リターンが何%下落(マイナス)したら", min_value=1.0, max_value=99.0, value=get_val("guardrail_trigger", 15.0), step=1.0) / 100
+        with col_g2:
+            guardrail_cut = st.number_input("カット率: その年の生活費・イベント費を何%削減するか", min_value=1.0, max_value=99.0, value=get_val("guardrail_cut", 15.0), step=1.0) / 100
+    else:
+        guardrail_trigger = 0.0
+        guardrail_cut = 0.0
 
 with tabs[7]:
     st.header("老人ホーム入居・自宅売却")
@@ -1263,7 +1393,8 @@ try:
         curr_ideco_balance = ideco_balance_init
         curr_dc_balance = dc_balance_init
         ideco_pension_annual = 0
-        main_ret_deduction_used = 0 
+        main_past_ret_events = [] 
+        ret_tax_details = []  # ★追加：レポート表示用の履歴リスト
         
         main_nisa_lifetime_invested = nisa_used_tsumitate + nisa_used_growth
         sp_nisa_lifetime_invested = sp_nisa_used_tsumitate + sp_nisa_used_growth if has_marriage else 0
@@ -1271,7 +1402,7 @@ try:
         curr_sp_ideco_balance = sp_ideco_balance_init if has_marriage else 0
         curr_sp_dc_balance = sp_dc_balance_init if has_marriage else 0
         sp_ideco_pension_annual = 0
-        sp_ret_deduction_used = 0 
+        sp_past_ret_events = [] 
 
         if has_marriage: sp_pension_actual = calc_pension_amount(sp_pension_base, sp_pension_start_age)
         else: sp_pension_actual = 0
@@ -1648,39 +1779,59 @@ try:
             ret_net_main, ret_inc_tax_main, ret_res_tax_main = 0, 0, 0
             ideco_lump_net_main = 0
             
+            main_ret_events_this_year = []
             if age == retirement_age and retirement_allowance > 0:
-                years = max(1, retirement_age - employment_start_age)
-                it, rt, used_ded = calc_ret_tax(retirement_allowance, years, prior_deduction=main_ret_deduction_used)
-                main_ret_deduction_used += used_ded
-                ret_inc_tax_main += it; ret_res_tax_main += rt
-                ret_net_main += (retirement_allowance - it - rt)
-                
+                main_ret_events_this_year.append({"type": "company", "start": employment_start_age, "end": retirement_age, "amount": retirement_allowance, "age": age})
             if ideco_lump_sum > 0:
-                years = max(1, age - ideco_start_age) 
-                it, rt, used_ded = calc_ret_tax(ideco_lump_sum, years, prior_deduction=main_ret_deduction_used)
-                if abs(age - retirement_age) <= 19:
-                    main_ret_deduction_used += used_ded 
-                ret_inc_tax_main += it; ret_res_tax_main += rt
-                ideco_lump_net_main = (ideco_lump_sum - it - rt)
+                main_ret_events_this_year.append({"type": "ideco", "start": ideco_start_age, "end": age, "amount": ideco_lump_sum, "age": age})
                 
+            if len(main_ret_events_this_year) == 1:
+                ev = main_ret_events_this_year[0]
+                it, rt, detail = calc_retirement_tax_with_rules(ev, main_past_ret_events, "本人")
+                ret_inc_tax_main += it; ret_res_tax_main += rt
+                if ev["type"] == "company": ret_net_main += (ev["amount"] - it - rt)
+                else: ideco_lump_net_main = (ev["amount"] - it - rt)
+                main_past_ret_events.append(ev)
+                ret_tax_details.append(detail) # ★レポートに追加
+            elif len(main_ret_events_this_year) > 1:
+                it, rt, detail = calc_same_year_retirement_tax(main_ret_events_this_year, "本人")
+                ret_inc_tax_main += it; ret_res_tax_main += rt
+                total_gross = sum(e["amount"] for e in main_ret_events_this_year)
+                for ev in main_ret_events_this_year:
+                    ratio = ev["amount"] / total_gross if total_gross > 0 else 0
+                    if ev["type"] == "company": ret_net_main += (ev["amount"] - it * ratio - rt * ratio)
+                    else: ideco_lump_net_main = (ev["amount"] - it * ratio - rt * ratio)
+                    main_past_ret_events.append(ev)
+                ret_tax_details.append(detail) # ★レポートに追加
+            
             ret_net_sp, ret_inc_tax_sp, ret_res_tax_sp = 0, 0, 0
             ideco_lump_net_sp = 0
             
             if has_marriage:
+                sp_ret_events_this_year = []
                 if sp_age == sp_retirement_age and sp_retirement_allowance > 0:
-                    years = max(1, sp_retirement_age - sp_employment_start_age)
-                    it, rt, used_ded = calc_ret_tax(sp_retirement_allowance, years, prior_deduction=sp_ret_deduction_used)
-                    sp_ret_deduction_used += used_ded
-                    ret_inc_tax_sp += it; ret_res_tax_sp += rt
-                    ret_net_sp += (sp_retirement_allowance - it - rt)
-                    
+                    sp_ret_events_this_year.append({"type": "company", "start": sp_employment_start_age, "end": sp_retirement_age, "amount": sp_retirement_allowance, "age": sp_age})
                 if sp_ideco_lump_sum > 0:
-                    years = max(1, sp_age - sp_ideco_start_age)
-                    it, rt, used_ded = calc_ret_tax(sp_ideco_lump_sum, years, prior_deduction=sp_ret_deduction_used)
-                    if abs(sp_age - sp_retirement_age) <= 19:
-                        sp_ret_deduction_used += used_ded
+                    sp_ret_events_this_year.append({"type": "ideco", "start": sp_ideco_start_age, "end": sp_age, "amount": sp_ideco_lump_sum, "age": sp_age})
+                    
+                if len(sp_ret_events_this_year) == 1:
+                    ev = sp_ret_events_this_year[0]
+                    it, rt, detail = calc_retirement_tax_with_rules(ev, sp_past_ret_events, "配偶者")
                     ret_inc_tax_sp += it; ret_res_tax_sp += rt
-                    ideco_lump_net_sp = (sp_ideco_lump_sum - it - rt)
+                    if ev["type"] == "company": ret_net_sp += (ev["amount"] - it - rt)
+                    else: ideco_lump_net_sp = (ev["amount"] - it - rt)
+                    sp_past_ret_events.append(ev)
+                    ret_tax_details.append(detail) # ★レポートに追加
+                elif len(sp_ret_events_this_year) > 1:
+                    it, rt, detail = calc_same_year_retirement_tax(sp_ret_events_this_year, "配偶者")
+                    ret_inc_tax_sp += it; ret_res_tax_sp += rt
+                    total_gross = sum(e["amount"] for e in sp_ret_events_this_year)
+                    for ev in sp_ret_events_this_year:
+                        ratio = ev["amount"] / total_gross if total_gross > 0 else 0
+                        if ev["type"] == "company": ret_net_sp += (ev["amount"] - it * ratio - rt * ratio)
+                        else: ideco_lump_net_sp = (ev["amount"] - it * ratio - rt * ratio)
+                        sp_past_ret_events.append(ev)
+                    ret_tax_details.append(detail) # ★レポートに追加
 
             arr_ret_inc_tax[i] = ret_inc_tax_main + ret_inc_tax_sp
             arr_ret_res_tax[i] = ret_res_tax_main + ret_res_tax_sp
@@ -1841,7 +1992,13 @@ try:
             arr_exp_edu[i] = exp_edu
             arr_exp_car[i] = exp_car
             arr_exp_nursing[i] = exp_nursing
-            arr_total_exp[i] = exp_base + events_exp_this_year + exp_house + exp_edu + exp_car + exp_nursing
+            # --- 🛡️ ガードレール機能（相場暴落時の支出カット） ---
+            if has_guardrail and return_arr[i] <= -guardrail_trigger:
+                # 住宅ローンや教育費などの固定費は削れない前提とし、変動費（生活費・イベント費）のみをカット
+                arr_exp_base[i] = arr_exp_base[i] * (1.0 - guardrail_cut)
+                arr_exp_event[i] = arr_exp_event[i] * (1.0 - guardrail_cut)
+
+            arr_total_exp[i] = arr_exp_base[i] + arr_exp_event[i] + arr_exp_house[i] + arr_exp_edu[i] + arr_exp_car[i] + arr_exp_nursing[i]
             
             applicable_tax_rate = future_tax_rate if age >= tax_change_age else 0.20
             
@@ -1941,10 +2098,26 @@ try:
                 else:
                     calc_savings += ideco_lump_net_sp
                     
+            # ★追加：今年の収支（赤字）を計算する前の預貯金残高を記憶
+            prev_savings_balance = calc_savings
+            
             arr_lump_sum_income[i] = lump_sum_income_this_year
             calc_savings += annual_balance + w_taxable + w_nisa
             
             actual_withdrawal_this_year = w_taxable + w_nisa
+            
+            # --- 最低維持ラインの動的計算 ---
+            current_total_assets = calc_savings + calc_taxable + calc_nisa + curr_ideco_balance + curr_dc_balance + curr_sp_ideco_balance + curr_sp_dc_balance
+            rate_amount = current_total_assets * min_savings_rate
+            
+            if min_savings_rule == "金額が高い方を採用":
+                target_savings = max(min_savings_amount, rate_amount)
+            elif min_savings_rule == "金額が低い方を採用":
+                target_savings = min(min_savings_amount, rate_amount)
+            elif min_savings_rule == "定率のみを採用":
+                target_savings = rate_amount
+            else:
+                target_savings = min_savings_amount
                 
             invested_this_year = 0
             if has_investment and age <= invest_end_age:
@@ -1958,7 +2131,9 @@ try:
                 invest_available_sp = 0
                 
             total_invest_target = invest_available_main + invest_available_sp
-            invest_available_from_savings = max(0, calc_savings - min_savings_amount)
+            
+            # 投資に回せるのは、目標維持ラインを超えている「現金の余剰分」のみ
+            invest_available_from_savings = max(0, calc_savings - target_savings)
             actual_invest = min(total_invest_target, invest_available_from_savings)
             
             if actual_invest > 0:
@@ -1993,22 +2168,22 @@ try:
                 calc_savings -= actual_invest
             arr_invest_amount[i] = actual_invest
 
-            shortfall = min_savings_amount - calc_savings
+            # ★修正箇所：赤字等で預貯金が目標維持ラインを下回った場合の補填ロジック
+            # 「目標額までの不足分」と「今年の赤字によって減少した貯金額」の小さい方を shortfall（取り崩し上限）とする。
+            shortfall_to_fill = max(0, target_savings - calc_savings)
+            max_allowed_withdrawal = max(0, prev_savings_balance - calc_savings)
+            
+            shortfall = min(shortfall_to_fill, max_allowed_withdrawal)
             
             if shortfall > 0:
-                if deficit_order == "特定口座(世帯) → NISA(世帯) → 預貯金(最低維持額割れ)":
+                if deficit_order == "特定口座(世帯) → NISA(世帯) → 預貯金を最低維持ラインまで使う":
                     order = [(calc_taxable, 'taxable'), (calc_nisa, 'nisa')]
-                elif deficit_order == "NISA(世帯) → 特定口座(世帯) → 預貯金(最低維持額割れ)":
+                elif deficit_order == "NISA(世帯) → 特定口座(世帯) → 預貯金を最低維持ラインまで使う":
                     order = [(calc_nisa, 'nisa'), (calc_taxable, 'taxable')]
-                elif deficit_order == "預貯金を先に限界まで → 特定口座(世帯) → NISA(世帯)":
-                    available_savings = max(0, calc_savings)
-                    take_from_savings = min(available_savings, shortfall)
-                    calc_savings -= take_from_savings
-                    shortfall -= take_from_savings
-                    actual_withdrawal_this_year += take_from_savings
+                elif deficit_order == "預貯金を最低維持ラインまで使う → 特定口座(世帯) → NISA(世帯)":
                     order = [(calc_taxable, 'taxable'), (calc_nisa, 'nisa')]
                 else:
-                    order = []
+                    order = [(calc_taxable, 'taxable'), (calc_nisa, 'nisa')]
                     
                 for val, name in order:
                     if shortfall <= 0: break
@@ -2022,6 +2197,7 @@ try:
                     actual_withdrawal_this_year += take
 
             arr_withdrawal_amount[i] = actual_withdrawal_this_year
+
             balances_nisa[i] = max(0, calc_nisa)
             balances_taxable[i] = max(0, calc_taxable)
             balances_savings[i] = calc_savings
@@ -2082,7 +2258,8 @@ try:
             "balances_taxable": balances_taxable,
             "balances_ideco_dc": balances_ideco_dc,
             "total_assets": total_assets,
-            "depletion_age": depletion_age
+            "depletion_age": depletion_age,
+            "arr_ret_tax_details": ret_tax_details 
         }
 
     def generate_return_array(expected_ret, risk, mode="fixed"):
@@ -2171,7 +2348,7 @@ try:
     
     if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
         st.markdown("### 🎲 モンテカルロ・シミュレーション結果（ストレステスト）")
-        st.write("設定されたリスク（標準偏差）に基づいて100通りの人生をシミュレーションし、「楽観・標準・悲観」の3つのシナリオを抽出しました。**下位10%の悲観シナリオは、暴落相場や長期低迷に直面した場合のストレステスト**として機能します。")
+        st.write("設定されたリスク（標準偏差）に基づいて300通りの人生をシミュレーションし、「楽観・標準・悲観」の3つのシナリオを抽出しました。**下位10%の悲観シナリオは、暴落相場や長期低迷に直面した場合のストレステスト**として機能します。")
         
         col_mc1, col_mc2 = st.columns(2)
         with col_mc1:
@@ -2259,11 +2436,26 @@ try:
         '純資産額': (res["total_assets"] - res["arr_debt_balance"]) / 10000
     }).set_index('本人年齢')
 
+
+
     style_func = lambda x: 'color: red' if isinstance(x, (int, float)) and x < 0 else ''
     try:
         st.dataframe(df.style.format("{:.1f}").map(style_func, subset=['世帯年間収支(取崩前)', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額']), height=400, use_container_width=True)
     except AttributeError:
         st.dataframe(df.style.format("{:.1f}").applymap(style_func, subset=['世帯年間収支(取崩前)', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額']), height=400, use_container_width=True)
+
+# キャッシュフローグラフ出力などの後に追加
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("### 📄 退職金・iDeCo 課税計算の詳細レポート")
+    st.caption("※適用されている退職所得控除の年数ルールや、税額の計算プロセスを確認できます。")
+    
+    if res.get("arr_ret_tax_details"):
+        df_ret_tax = pd.DataFrame(res["arr_ret_tax_details"])
+        # DataFrameをきれいに全幅で表示
+        st.dataframe(df_ret_tax, use_container_width=True, hide_index=True)
+    else:
+        st.info("シミュレーション期間中に一時金として受け取る退職金やiDeCoの設定はありません。")
+
 
     # --- アフィリエイト・ネクストアクション エリア ---
     st.markdown("---")
