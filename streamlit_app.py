@@ -486,7 +486,21 @@ with tabs[0]:
     with col2:
         if is_working == "就業中（給与収入あり）":
             gross_income = st.number_input("現在の額面年収（万円）", value=int(get_val("gross_income", 6000000)/10000), step=10) * 10000
-            salary_growth = st.number_input("毎年の昇給率 (%)", min_value=0.0, max_value=5.0, value=get_val("salary_growth", 0.01)*100, step=0.1) / 100
+            salary_growth = st.number_input("毎年の昇給率 (%)", min_value=0.0, max_value=30.0, value=get_val("salary_growth", 0.03)*100, step=0.1) / 100
+
+            has_salary_cap = st.checkbox("昇給の頭打ち（上限額・停止年齢）を設定する(本人)", value=get_val("has_salary_cap", False))
+            if has_salary_cap:
+                saved_cap = get_val("salary_cap_amount", 8000000)
+                default_cap = 8000000 if saved_cap >= 1000000000 else saved_cap
+                salary_cap_amount = st.number_input("昇給上限キャップ（額面・万円）(本人)", min_value=100, max_value=10000, value=int(default_cap/10000), step=10) * 10000
+                
+                saved_plateau = get_val("salary_plateau_age", 50)
+                default_plateau = 50 if saved_plateau >= 1000 else saved_plateau
+                salary_plateau_age = safe_number_input("昇給がストップする年齢(本人)", min_value=current_age, max_value=100, default_value=default_plateau, step=1)
+            else:
+                salary_cap_amount = 1000000000
+                salary_plateau_age = 1000
+
             has_salary_decrease = st.checkbox("役職定年等による給与減額あり(本人)", value=get_val("has_salary_decrease", False))
             if has_salary_decrease:
                 salary_decrease_age = st.number_input("減額される年齢", min_value=current_age, max_value=85, value=get_val("salary_decrease_age", 55), step=1)
@@ -496,11 +510,14 @@ with tabs[0]:
                 salary_decrease_rate = 0.0
                 
             retirement_age = safe_number_input("退職予定年齢(会社の退職金)", min_value=20, max_value=100, default_value=get_val("retirement_age", 60), step=1)
-            retirement_allowance = st.number_input("会社の退職金見込額（万円）", value=int(get_val("retirement_allowance", 15000000)/10000), step=10) * 10000
+            retirement_allowance = st.number_input("会社の退職金見込額（万円）", value=int(get_val("retirement_allowance", 5000000)/10000), step=10) * 10000
             actual_is_working = True
         else:
             gross_income = 0
             salary_growth = 0
+            has_salary_cap = False
+            salary_cap_amount = 1000000000
+            salary_plateau_age = 1000
             salary_decrease_age = 1000
             salary_decrease_rate = 0.0
             retirement_age = safe_number_input("退職した年齢(退職金受給済の場合は現在の年齢)", min_value=20, max_value=100, default_value=get_val("retirement_age", current_age), step=1)
@@ -536,6 +553,20 @@ with tabs[1]:
             if sp_working_status == "就業中（給与収入あり）":
                 sp_gross_income = st.number_input("配偶者の現在の額面年収（万円）", value=int(get_val("sp_gross_income", 3000000)/10000), step=10) * 10000
                 sp_salary_growth = st.number_input("配偶者の毎年の昇給率 (%)", min_value=0.0, max_value=5.0, value=get_val("sp_salary_growth", 0.01)*100, step=0.1) / 100
+
+                has_sp_salary_cap = st.checkbox("昇給の頭打ち（上限額・停止年齢）を設定する(配偶者)", value=get_val("has_sp_salary_cap", False))
+                if has_sp_salary_cap:
+                    saved_sp_cap = get_val("sp_salary_cap_amount", 5000000)
+                    default_sp_cap = 5000000 if saved_sp_cap >= 1000000000 else saved_sp_cap
+                    sp_salary_cap_amount = st.number_input("配偶者の昇給上限キャップ（額面・万円）", min_value=100, max_value=10000, value=int(default_sp_cap/10000), step=10) * 10000
+                    
+                    saved_sp_plateau = get_val("sp_salary_plateau_age", 50)
+                    default_sp_plateau = 50 if saved_sp_plateau >= 1000 else saved_sp_plateau
+                    sp_salary_plateau_age = safe_number_input("配偶者の昇給がストップする年齢", min_value=current_age + sp_age_diff, max_value=100, default_value=default_sp_plateau, step=1)
+                else:
+                    sp_salary_cap_amount = 1000000000
+                    sp_salary_plateau_age = 1000
+
                 has_sp_salary_decrease = st.checkbox("役職定年等による給与減額あり(配偶者)", value=get_val("has_sp_salary_decrease", False))
                 if has_sp_salary_decrease:
                     sp_salary_decrease_age = st.number_input("配偶者が減額される年齢", min_value=current_age + sp_age_diff, max_value=85, value=get_val("sp_salary_decrease_age", 55), step=1)
@@ -550,6 +581,9 @@ with tabs[1]:
             else:
                 sp_gross_income = 0
                 sp_salary_growth = 0
+                has_sp_salary_cap = False
+                sp_salary_cap_amount = 1000000000
+                sp_salary_plateau_age = 1000
                 sp_salary_decrease_age = 1000
                 sp_salary_decrease_rate = 0.0
                 sp_retirement_age = safe_number_input("配偶者の退職した年齢(受取済の場合は現在の年齢)", min_value=20, max_value=100, default_value=get_val("sp_retirement_age", current_age + sp_age_diff), step=1)
@@ -570,6 +604,9 @@ with tabs[1]:
     else:
         sp_age_diff = marriage_age = wedding_cost = sp_gross_income = sp_salary_growth = 0
         sp_employment_start_age = 22
+        has_sp_salary_cap = False
+        sp_salary_cap_amount = 1000000000
+        sp_salary_plateau_age = 1000
         sp_salary_decrease_age = 1000
         sp_salary_decrease_rate = 0.0
         sp_retirement_age = sp_retirement_allowance = 0
@@ -1603,8 +1640,11 @@ try:
                 if actual_is_working:
                     normal_salary_main = gross_income
                     for a in range(current_age, age + 1):
-                        if a == salary_decrease_age: normal_salary_main *= (1 - salary_decrease_rate)
-                        elif a > current_age: normal_salary_main *= (1 + salary_growth)
+                        if a == salary_decrease_age:
+                            normal_salary_main *= (1 - salary_decrease_rate)
+                        elif a > current_age:
+                            if a <= salary_plateau_age:
+                                normal_salary_main = min(normal_salary_main * (1 + salary_growth), salary_cap_amount)
                 else:
                     normal_salary_main = 0
             else:
@@ -1618,8 +1658,11 @@ try:
                     if actual_sp_working:
                         normal_salary_sp = sp_gross_income
                         for a in range(current_age + sp_age_diff, sp_age + 1):
-                            if a == sp_salary_decrease_age: normal_salary_sp *= (1 - sp_salary_decrease_rate)
-                            elif a > current_age + sp_age_diff: normal_salary_sp *= (1 + sp_salary_growth)
+                            if a == sp_salary_decrease_age:
+                                normal_salary_sp *= (1 - sp_salary_decrease_rate)
+                            elif a > current_age + sp_age_diff:
+                                if a <= sp_salary_plateau_age:
+                                    normal_salary_sp = min(normal_salary_sp * (1 + sp_salary_growth), sp_salary_cap_amount)
                     else:
                         normal_salary_sp = 0
                 else:
