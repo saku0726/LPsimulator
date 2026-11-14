@@ -2343,9 +2343,12 @@ try:
             arr = np.full(years_count, expected_ret)
         else:
             arr = np.random.normal(expected_ret, risk, years_count)
-            for y in range(years_count):
-                if np.random.rand() < 0.10:
-                    arr[y] -= np.random.uniform(0.20, 0.40)
+            if mc_crash_prob > 0:
+                low_bound = min(mc_crash_min, mc_crash_max)
+                high_bound = max(mc_crash_min, mc_crash_max)
+                for y in range(years_count):
+                    if np.random.rand() < mc_crash_prob:
+                        arr[y] -= np.random.uniform(low_bound, high_bound)
             
         if has_market_shock and shock_age in ages:
             idx = ages.index(shock_age)
