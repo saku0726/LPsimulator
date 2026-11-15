@@ -85,9 +85,9 @@ AFFILIATE_LINKS = {
     "credit_card": "https://example.com/?a=credit_card",     # 🥉 3位: クレカ積立用カード (三井住友カード等)
     "real_estate": "https://example.com/?a=real_estate",     # 4位: 不動産一括査定 (イエウール/すまいステップ等)
     "kakeibo_app": "https://example.com/?a=kakeibo_app",     # 5位: 無料家計簿アプリ (マネーフォワードME等)
-    "career_up": "https://example.com/?a=career_up"          # 番外: 年収アップ・転職エージェント
+    "career_up": "https://example.com/?a=career_up",         # 番外: 年収アップ・転職エージェント
+    "furusato": "https://example.com/?a=furusato"            # 🎁 特枠: ふるさと納税 (ふるなび/さとふる等の定率案件)
 }
-
 
 # --- Helper Functions ---
 def safe_number_input(label, min_value, max_value, default_value, step=1, **kwargs):
@@ -155,6 +155,42 @@ def calc_tax_and_soc(salary, pension, other_misc_income=0, prev_salary=0, prev_p
     resident_tax = taxable_income_res * 0.10
     
     return soc_ins, income_tax, resident_tax
+
+def calc_furusato_limit(salary, pension=0, ideco_yearly=0, fam_deduction=0, age=40, is_working=True):
+    """現在の年収・家族構成・iDeCo掛金から、ふるさと納税の年間控除上限額（目安・円）を算出する"""
+    if salary <= 0 and pension <= 0:
+        return 0
+    soc_ins, _, _ = calc_tax_and_soc(
+        salary, pension, prev_salary=salary, prev_pension=pension,
+        ideco_deduction=ideco_yearly, fam_deduction=fam_deduction, age=age, is_working=is_working
+    )
+    emp_inc = max(0, salary - calc_salary_deduction(salary))
+    pen_ded = (1100000 if age >= 65 else 600000) if pension > 0 else 0
+    pub_pen_inc = max(0, pension - pen_ded)
+    total_inc = emp_inc + pub_pen_inc
+
+    # 所得税の課税所得と適用税率の特定
+    taxable_inc = max(0, total_inc - soc_ins - 480000 - ideco_yearly - fam_deduction)
+    inc_rate = 0.05
+    for limit, rate, _ in INCOME_TAX_BRACKETS:
+        if taxable_inc <= limit:
+            inc_rate = rate
+            break
+
+    # 住民税所得割額の算出
+    fam_ded_res = fam_deduction * (330000 / 380000) if fam_deduction > 0 else 0
+    taxable_res = max(0, total_inc - soc_ins - 430000 - ideco_yearly - fam_ded_res)
+    res_tax_shotokuwari = taxable_res * 0.10
+    if res_tax_shotokuwari <= 0:
+        return 0
+
+    # 特例控除上限(住民税所得割の20%)から逆算した寄付上限額
+    denom = 0.90 - (inc_rate * 1.021)
+    if denom <= 0:
+        return 0
+    limit_yen = (res_tax_shotokuwari * 0.20) / denom + 2000
+    return int(limit_yen // 1000) * 1000
+
 
 def calc_mortgage_pmt(principal, rate, years):
     if years == 0 or rate == 0: return 0
@@ -817,6 +853,11 @@ with tabs[0]:
     else:
         post_retirement_income = 0
         post_retirement_end_age = 0
+
+    if actual_is_working and gross_income > 0:
+        est_furusato_main = calc_furusato_limit(gross_income, age=current_age, is_working=True)
+        if est_furusato_main >= 10000:
+            st.caption(f"🎁 **ふるさと納税の上限目安：** 現在の年収（{int(gross_income/10000)}万円）での年間寄付上限は **約 {est_furusato_main/10000:,.1f} 万円**（{est_furusato_main:,}円）です（iDeCoや扶養控除は下部サマリーで自動反映）。[👉 人気のふるさと納税サイトで返礼品を見る (PR)]({AFFILIATE_LINKS['furusato']})")
 
 with tabs[1]:
     st.header("配偶者の基本・収入・退職")
@@ -3172,8 +3213,29 @@ try:
     st.markdown("<br>", unsafe_allow_html=True)
 
 # --- ★新設：シミュレーション数値連動型「AI家計・資産改善ポテンシャル診断」 ---
+    init_fam_ded = 380000 if (has_marriage and current_age >= marriage_age and (not actual_sp_working or sp_gross_income <= 1500000)) else 0
+    for ch in child_settings:
+        c_a = current_age - ch["birth_age"]
+        if 16 <= c_a <= 18: init_fam_ded += 380000
+        elif 19 <= c_a <= 22: init_fam_ded += 630000
+    init_ideco_m = (ideco_monthly * 12) if (has_ideco and current_age < ideco_receipt_age) else 0
+    init_ideco_s = (sp_ideco_monthly * 12) if (has_marriage and has_sp_ideco and (current_age + sp_age_diff) < sp_ideco_receipt_age) else 0
+
+    furusato_limit_main = calc_furusato_limit(res_base["arr_salary"][0], res_base["arr_pension"][0], init_ideco_m, init_fam_ded, current_age, actual_is_working)
+    furusato_limit_sp = calc_furusato_limit(res_base["arr_sp_salary"][0], res_base["arr_sp_pension"][0], init_ideco_s, 0, current_age + sp_age_diff, actual_sp_working) if has_marriage else 0
+    furusato_limit_total = furusato_limit_main + furusato_limit_sp
+
     with st.container(border=True):
         st.markdown("##### 💡 シミュレーション数値に基づく「家計・資産の改善ポテンシャル診断」")
+        if furusato_limit_total >= 10000:
+            sp_fur_text = f"（本人: 約{furusato_limit_main/10000:,.1f}万円 ／ 配偶者: 約{furusato_limit_sp/10000:,.1f}万円）" if furusato_limit_sp > 0 else ""
+            col_fur_txt, col_fur_btn = st.columns([7, 3])
+            with col_fur_txt:
+                st.markdown(f"🎁 **今年のふるさと納税 控除上限目安：世帯合計 約 {furusato_limit_total/10000:,.1f} 万円** {sp_fur_text}\n\n<span style='font-size:0.88rem;color:#495057;'>※年収・社会保険料・iDeCo掛金・扶養家族をすべて反映した目安です。実質2,000円の負担でお米や食材・日用品を受け取ることで、毎年の基本生活費（食費等）を確実に圧縮できます。</span>", unsafe_allow_html=True)
+            with col_fur_btn:
+                st.link_button(f"🎁 上限{furusato_limit_total/10000:,.1f}万円以内で返礼品を探す (PR)", AFFILIATE_LINKS["furusato"], use_container_width=True)
+            st.divider()
+
         diag_cols = st.columns(3)
         
         # 診断1：住宅ローンの金利引き下げポテンシャル（設定中のローンがある場合、金利-0.3%での削減額を実計算）
@@ -3488,13 +3550,15 @@ try:
                 st.link_button("🏢 自宅の無料一括査定 (PR)", AFFILIATE_LINKS["real_estate"], use_container_width=True)
 
         with st.container(border=True):
-            st.markdown("📱 **Step 4：日々の家計の自動化 ＆ 収入アップで入金力を高める**")
-            st.write("シミュレーションの精度をさらに高めるには、銀行・クレカ連携アプリでの支出の自動可視化と、本業・副業での入金力アップ（昇給・転職）が両輪となります。")
-            c_sub1, c_sub2 = st.columns(2)
+            st.markdown("📱 **Step 4：ふるさと納税・家計自動化・収入アップで入金力を高める**")
+            st.write("ふるさと納税による食費・日用品費の削減、家計簿アプリでの支出の自動可視化、そして本業・副業での入金力アップ（昇給・転職）が資産形成を加速させます。")
+            c_sub1, c_sub2, c_sub3 = st.columns(3)
             with c_sub1:
-                st.link_button("📱 無料家計簿アプリ (PR)", AFFILIATE_LINKS["kakeibo_app"], use_container_width=True)
+                st.link_button("🎁 ふるさと納税 (PR)", AFFILIATE_LINKS["furusato"], use_container_width=True)
             with c_sub2:
-                st.link_button("💼 転職で年収アップ診断 (PR)", AFFILIATE_LINKS["career_up"], use_container_width=True)
+                st.link_button("📱 無料家計簿アプリ (PR)", AFFILIATE_LINKS["kakeibo_app"], use_container_width=True)
+            with c_sub3:
+                st.link_button("💼 年収アップ診断 (PR)", AFFILIATE_LINKS["career_up"], use_container_width=True)
 
     # --- ★ASP審査通過・コンプライアンス遵守のための免責事項・PR表記 ---
     st.markdown("<br>", unsafe_allow_html=True)
