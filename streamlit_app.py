@@ -307,158 +307,321 @@ def get_val(key, default):
     # 過去のURLに無い新しい項目は、自動的にdefault値を使ってエラーを防ぐ（後方互換性）
     return st.session_state['loaded_state'].get(key, default)
 
+def get_pct_val(key, default_pct):
+    """URL保存時に /100 された小数(0.10等)で保存されていても、画面表示用の%(10.0等)に自動復元する関数"""
+    v = float(get_val(key, default_pct))
+    # もし保存されていた値が 1.0 以下（例: 0.05 や 0.10）で、本来の初期値が 1.0 より大きい（例: 5.0 や 10.0）なら100倍して戻す
+    if 0 < abs(v) <= 1.0 and abs(default_pct) > 1.0:
+        return round(v * 100.0, 4)
+    return v
+
 # --- Plotting Functions ---
-def plot_monte_carlo(ages, p90, p50, p10):
+def format_man_oku_val(val_man, show_decimal=False):
+    """万円単位の数値を『〇億〇,〇〇〇万円』（小数点なし）の文字列に変換する補助関数"""
+    if pd.isna(val_man):
+        return "0万円"
+    sign = "-" if val_man < 0 else ""
+    abs_val = abs(float(val_man))
+    
+    if not show_decimal:
+        abs_int = int(round(abs_val))
+        if abs_int == 0:
+            return "0万円"
+        oku = abs_int // 10000
+        man = abs_int % 10000
+        if oku > 0:
+            return f"{sign}{oku}億{man:,}万円" if man > 0 else f"{sign}{oku}億円"
+        else:
+            return f"{sign}{man:,}万円"
+    else:
+        oku = int(abs_val // 10000)
+        man = abs_val % 10000
+        if oku > 0:
+            return f"{sign}{oku}億{man:,.1f}万円" if man >= 0.05 else f"{sign}{oku}億円"
+        else:
+            return f"{sign}{man:,.1f}万円"
+
+def format_man_oku_array(arr_yen, show_decimal=False):
+    """円単位の配列を受け取り、ホバー表示用の『〇億〇,〇〇〇万円』文字列リストを返す"""
+    arr_man = np.asarray(arr_yen) / 10000.0
+    return [format_man_oku_val(v, show_decimal) for v in arr_man]
+
+def get_jp_axis_ticks(min_man, max_man):
+    """Y軸の最小・最大値(万円)から、『k』を使わない自然な日本語目盛り(億・万円)を生成する"""
+    span = max_man - min_man
+    if span <= 0:
+        return None, None
+    raw_step = span / 6.0
+    nice_steps = [50, 100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000, 20000, 25000, 50000, 100000]
+    step = next((s for s in nice_steps if s >= raw_step), 100000)
+    
+    start_tick = int(np.floor(min_man / step)) * step
+    end_tick = int(np.ceil(max_man / step)) * step
+    
+    tickvals = list(range(start_tick, end_tick + step, step))
+    ticktext = []
+    for v in tickvals:
+        if v == 0:
+            ticktext.append("0万円")
+        else:
+            sign = "-" if v < 0 else ""
+            av = abs(v)
+            oku = av // 10000
+            man = av % 10000
+            if oku > 0:
+                ticktext.append(f"{sign}{oku}億{man:,}万円" if man > 0 else f"{sign}{oku}億円")
+            else:
+                ticktext.append(f"{sign}{man:,}万円")
+    return tickvals, ticktext
+
+
+def plot_monte_carlo(ages, p90, p50, p10, p10_no_defense=None, view_mode="all"):
     fig = go.Figure()
     
+    # ★③「暴落対策のプラス効果（差額）をクローズアップ」モード
+    if view_mode == "diff" and p10_no_defense is not None:
+        diff_yen = p10 - p10_no_defense
+        diff_man = diff_yen / 10000.0
+        fig.add_trace(go.Scatter(
+            x=ages, y=diff_man, mode='lines', name='暴落対策による純資産プラス効果 (対策あり − 対策なし)',
+            line=dict(color='#2ca02c', width=3),
+            fill='tozeroy',
+            fillcolor='rgba(44, 160, 44, 0.2)',
+            customdata=[("+" if v > 0 else "") + format_man_oku_val(v) for v in diff_man],
+            hovertemplate='対策効果: %{customdata}<extra></extra>'
+        ))
+        fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1)
+        
+        min_y = min(0, float(np.min(diff_man)))
+        max_y = max(100, float(np.max(diff_man)) * 1.1)
+        t_vals, t_text = get_jp_axis_ticks(min_y, max_y)
+        
+        fig.update_xaxes(fixedrange=True, ticksuffix="歳")
+        if t_vals:
+            fig.update_yaxes(fixedrange=True, tickvals=t_vals, ticktext=t_text, range=[min(t_vals), max(t_vals)])
+        else:
+            fig.update_yaxes(fixedrange=True, tickformat=",d", ticksuffix="万円")
+            
+        fig.update_layout(title="🛡️ 暴落対策による純資産の改善額推移（悲観シナリオ：対策あり − 対策なし）", hovermode="x unified", height=420, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        return fig
+
+    # ★①通常全体表示("all") ＆ ②対数風圧縮スケール("symlog")
+    scale_base = 1000.0 # 1,000万円を基準に対数圧縮
+    def trans_y(arr_yen):
+        y_man = np.asarray(arr_yen) / 10000.0
+        if view_mode == "symlog":
+            return np.sign(y_man) * np.log10(1.0 + np.abs(y_man) / scale_base)
+        return y_man
+
     # 帯の描画 (p10 to p90)
     fig.add_trace(go.Scatter(
         x=ages + ages[::-1],
-        y=np.concatenate([p90/10000, p10[::-1]/10000]),
+        y=np.concatenate([trans_y(p90), trans_y(p10[::-1])]),
         fill='toself',
         fillcolor='rgba(0,176,246,0.15)',
         line=dict(color='rgba(255,255,255,0)'),
         name='上位10%〜下位10%のブレ幅',
+        hoverinfo='skip',
         showlegend=True
     ))
     
-    # p50 (中央値)
-    fig.add_trace(go.Scatter(x=ages, y=p50/10000, mode='lines', name='標準シナリオ (中央値)', line=dict(color='#1f77b4', width=3)))
-    
-    # p10 (悲観・暴落想定)
-    fig.add_trace(go.Scatter(x=ages, y=p10/10000, mode='lines', name='悲観シナリオ (下位10% / 暴落・低迷想定)', line=dict(color='#d62728', width=3, dash='dash')))
-    
     # p90 (楽観)
-    fig.add_trace(go.Scatter(x=ages, y=p90/10000, mode='lines', name='楽観シナリオ (上位10%)', line=dict(color='#2ca02c', width=2, dash='dot')))
+    fig.add_trace(go.Scatter(
+        x=ages, y=trans_y(p90), mode='lines', name='楽観シナリオ (上位10%)',
+        line=dict(color='#2ca02c', width=2, dash='dot'),
+        customdata=format_man_oku_array(p90),
+        hovertemplate='%{customdata}'
+    ))
+
+    # p50 (中央値)
+    fig.add_trace(go.Scatter(
+        x=ages, y=trans_y(p50), mode='lines', name='標準シナリオ (中央値)',
+        line=dict(color='#1f77b4', width=3),
+        customdata=format_man_oku_array(p50),
+        hovertemplate='%{customdata}'
+    ))
+    
+    # 暴落対策がOFFだった場合の悲観シナリオ比較ライン
+    if p10_no_defense is not None:
+        fig.add_trace(go.Scatter(
+            x=ages, y=trans_y(p10_no_defense), mode='lines', name='悲観シナリオ (もし暴落対策がなかった場合)',
+            line=dict(color='#7f7f7f', width=2.5, dash='dot'),
+            customdata=format_man_oku_array(p10_no_defense),
+            hovertemplate='%{customdata}'
+        ))
+
+    # p10 (悲観・暴落想定)
+    fill_mode = 'tonexty' if (p10_no_defense is not None and view_mode == "symlog") else None
+    fig.add_trace(go.Scatter(
+        x=ages, y=trans_y(p10), mode='lines', name='悲観シナリオ (下位10% / 暴落対策あり)',
+        line=dict(color='#d62728', width=3, dash='dash'),
+        fill=fill_mode,
+        fillcolor='rgba(44, 160, 44, 0.15)' if fill_mode else None,
+        customdata=format_man_oku_array(p10),
+        hovertemplate='%{customdata}'
+    ))
     
     # ゼロライン
     fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1)
     
-    fig.update_xaxes(fixedrange=True)
-    fig.update_yaxes(fixedrange=True)
-    fig.update_layout(title="モンテカルロ・シミュレーション (300回試行) による純資産推移", hovermode="x unified", height=400, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    fig.update_xaxes(fixedrange=True, ticksuffix="歳")
+
+    if view_mode == "symlog":
+        # 対数圧縮スケール用の目盛り生成
+        raw_ticks = [-5000, -2000, -1000, -500, 0, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000]
+        all_man = np.concatenate([p90/10000, p10/10000] + ([p10_no_defense/10000] if p10_no_defense is not None else []))
+        min_m, max_m = min(0, float(np.min(all_man))), max(1000, float(np.max(all_man)))
+        valid_ticks = [v for v in raw_ticks if min_m * 1.2 <= v <= max_m * 1.5]
+        if 0 not in valid_ticks: valid_ticks.append(0)
+        valid_ticks = sorted(list(set(valid_ticks)))
+        t_vals = [float(np.sign(v) * np.log10(1.0 + abs(v) / scale_base)) for v in valid_ticks]
+        t_text = [format_man_oku_val(v) if v != 0 else "0万円" for v in valid_ticks]
+        fig.update_yaxes(fixedrange=True, tickvals=t_vals, ticktext=t_text)
+    else:
+        all_vals = [p90/10000, p50/10000, p10/10000]
+        if p10_no_defense is not None:
+            all_vals.append(p10_no_defense/10000)
+            
+        min_y = min(0, float(np.min(all_vals)))
+        max_y = max(500, float(np.max(all_vals)) * 1.05)
+        t_vals, t_text = get_jp_axis_ticks(min_y, max_y)
+        
+        if t_vals:
+            fig.update_yaxes(fixedrange=True, tickvals=t_vals, ticktext=t_text, range=[min(t_vals), max(t_vals)])
+        else:
+            fig.update_yaxes(fixedrange=True, tickformat=",d", ticksuffix="万円")
+        
+    fig.update_layout(title="モンテカルロ・シミュレーション (300回試行) による純資産推移", hovermode="x unified", height=420, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     return fig
 
-def plot_asset_transition(ages, balances_savings, balances_nisa, balances_taxable, balances_ideco_dc, arr_debt_housing, arr_debt_car, arr_debt_reform, arr_debt_edu, arr_annual_balance):
+
+def plot_asset_transition(ages, balances_savings, balances_dry_powder, balances_nisa, balances_taxable, balances_ideco_dc, arr_debt_housing, arr_debt_car, arr_debt_reform, arr_debt_edu, arr_annual_balance, arr_spot_invest=None):
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(go.Bar(x=ages, y=balances_savings/10000, name="世帯 預貯金", marker_color='#2ca02c', hovertemplate='%{y:.1f}万円'), secondary_y=False)
-    fig.add_trace(go.Bar(x=ages, y=balances_nisa/10000, name="世帯 NISA", marker_color='#ff7f0e', hovertemplate='%{y:.1f}万円'), secondary_y=False)
-    fig.add_trace(go.Bar(x=ages, y=balances_taxable/10000, name="世帯 特定口座", marker_color='#1f77b4', hovertemplate='%{y:.1f}万円'), secondary_y=False)
-    fig.add_trace(go.Bar(x=ages, y=balances_ideco_dc/10000, name="世帯 iDeCo/DC", marker_color='#9467bd', hovertemplate='%{y:.1f}万円'), secondary_y=False)
+    
+    def add_asset_bar(y_yen, name, color, prefix=""):
+        # 全期間で0円の項目は追加しない
+        if np.all(np.abs(y_yen) < 1):
+            return
+        y_man = y_yen / 10000.0
+        # 0円の年はNaNにしてホバー表示から隠す
+        y_plot = np.where(np.abs(y_man) >= 0.5, y_man, np.nan)
+        hover_str = f"{prefix}%{{customdata}}" if prefix else "%{customdata}"
+        fig.add_trace(go.Bar(
+            x=ages, y=y_plot, name=name, marker_color=color,
+            customdata=format_man_oku_array(y_yen),
+            hovertemplate=hover_str
+        ), secondary_y=False)
 
-    if arr_debt_housing.sum() > 0:
-        fig.add_trace(go.Bar(x=ages, y=-arr_debt_housing/10000, name="住宅ローン残高", marker_color='#7f7f7f', base=0, hovertemplate='住宅ローン: %{y:.1f}万円'), secondary_y=False)
-    if arr_debt_car.sum() > 0:
-        fig.add_trace(go.Bar(x=ages, y=-arr_debt_car/10000, name="自動車ローン残高(世帯)", marker_color='#bcbd22', base=0, hovertemplate='自動車ローン: %{y:.1f}万円'), secondary_y=False)
-    if arr_debt_reform.sum() > 0:
-        fig.add_trace(go.Bar(x=ages, y=-arr_debt_reform/10000, name="リフォームローン残高", marker_color='#e377c2', base=0, hovertemplate='リフォームローン: %{y:.1f}万円'), secondary_y=False)
-    if arr_debt_edu.sum() > 0:
-        fig.add_trace(go.Bar(x=ages, y=-arr_debt_edu/10000, name="教育ローン残高", marker_color='#17becf', base=0, hovertemplate='教育ローン: %{y:.1f}万円'), secondary_y=False)
+    add_asset_bar(balances_savings, "世帯 預貯金(生活防衛)", '#2ca02c')
+    add_asset_bar(balances_dry_powder, "暴落待機資金", '#00b4d8')
+    add_asset_bar(balances_nisa, "世帯 NISA", '#ff7f0e')
+    add_asset_bar(balances_taxable, "世帯 特定口座", '#1f77b4')
+    add_asset_bar(balances_ideco_dc, "世帯 iDeCo/DC", '#9467bd')
 
-    fig.add_trace(go.Scatter(x=ages, y=arr_annual_balance/10000, name="世帯単年収支(取崩前)", mode='lines', line=dict(color='#d62728', width=3, dash='dot'), hovertemplate='%{y:.1f}万円'), secondary_y=True)
+    add_asset_bar(-arr_debt_housing, "住宅ローン残高", '#7f7f7f', "住宅ローン: ")
+    add_asset_bar(-arr_debt_car, "自動車ローン残高(世帯)", '#bcbd22', "自動車ローン: ")
+    add_asset_bar(-arr_debt_reform, "リフォームローン残高", '#e377c2', "リフォームローン: ")
+    add_asset_bar(-arr_debt_edu, "教育ローン残高", '#17becf', "教育ローン: ")
 
-    fig.update_xaxes(fixedrange=True)
-    fig.update_yaxes(fixedrange=True)
+    # 暴落時スポット投資が発動した年に金色の星マーカーを表示
+    total_pos_bars = (np.maximum(0, balances_savings) + balances_dry_powder + balances_nisa + balances_taxable + balances_ideco_dc) / 10000
+    if arr_spot_invest is not None and arr_spot_invest.sum() > 0:
+        spot_indices = [idx for idx, val in enumerate(arr_spot_invest) if val > 0]
+        spot_ages = [ages[idx] for idx in spot_indices]
+        spot_y = [total_pos_bars[idx] * 1.04 + 100 for idx in spot_indices]
+        spot_vals = [format_man_oku_val(arr_spot_invest[idx] / 10000) for idx in spot_indices]
+        fig.add_trace(go.Scatter(
+            x=spot_ages,
+            y=spot_y,
+            mode='markers',
+            name='🎯 暴落スポット投資発動',
+            marker=dict(symbol='star', size=14, color='#ffd700', line=dict(color='#d62728', width=1.5)),
+            customdata=spot_vals,
+            hovertemplate='🎯 スポット投資発動: %{customdata}投入<extra></extra>'
+        ), secondary_y=False)
+
+    fig.add_trace(go.Scatter(x=ages, y=arr_annual_balance/10000, name="世帯単年収支(取崩前)", mode='lines', line=dict(color='#d62728', width=3, dash='dot'), customdata=format_man_oku_array(arr_annual_balance), hovertemplate='%{customdata}'), secondary_y=True)
+
+    total_neg_bars = -(arr_debt_housing + arr_debt_car + arr_debt_reform + arr_debt_edu) / 10000
+    min_y1 = min(0, float(np.min(total_neg_bars)), float(np.min(balances_savings / 10000)))
+    max_y1 = max(1000, float(np.max(total_pos_bars)) * 1.08)
+    t_vals1, t_text1 = get_jp_axis_ticks(min_y1, max_y1)
+
+    fig.update_xaxes(fixedrange=True, ticksuffix="歳")
+    if t_vals1:
+        fig.update_yaxes(fixedrange=True, tickvals=t_vals1, ticktext=t_text1, secondary_y=False)
+    else:
+        fig.update_yaxes(fixedrange=True, tickformat=",d", ticksuffix="万円", secondary_y=False)
+    fig.update_yaxes(fixedrange=True, tickformat=",d", ticksuffix="万円", secondary_y=True)
+    
     fig.update_layout(dragmode=False, barmode='relative', hovermode="x unified", height=500, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     return fig
 
-def plot_cashflow_breakdown(ages, years_count, arr_salary, arr_sp_salary, arr_pension, arr_child_allowance, arr_leave_benefit, arr_ret_income, arr_sp_pension, arr_withdrawal_amount, arr_exp_base, arr_exp_insurance, arr_exp_event, arr_exp_house, arr_exp_edu, arr_exp_car, arr_exp_nursing, arr_soc_ins, arr_sp_soc_ins, arr_inc_tax, arr_sp_inc_tax, arr_res_tax, arr_sp_res_tax, arr_ret_inc_tax, arr_ret_res_tax, arr_lump_sum_income):
+
+def plot_cashflow_breakdown(ages, years_count, arr_salary, arr_sp_salary, arr_pension, arr_child_allowance, arr_leave_benefit, arr_ret_income, arr_sp_pension, arr_withdrawal_amount, arr_exp_base, arr_exp_support, arr_exp_ideco_savings_ins, arr_exp_insurance, arr_exp_event, arr_exp_house, arr_exp_edu, arr_exp_car, arr_exp_nursing, arr_soc_ins, arr_sp_soc_ins, arr_inc_tax, arr_sp_inc_tax, arr_res_tax, arr_sp_res_tax, arr_ret_inc_tax, arr_ret_res_tax, arr_lump_sum_income):
     fig = go.Figure()
 
     base_inc = np.zeros(years_count)
-    y_sal = arr_salary/10000
-    fig.add_trace(go.Bar(x=ages, y=y_sal, name="本人 給与収入", offsetgroup=1, base=base_inc, customdata=y_sal, marker_color='#1f77b4', hovertemplate='%{customdata:.1f}万円'))
-    base_inc += y_sal
-
-    y_sp_sal = arr_sp_salary/10000
-    fig.add_trace(go.Bar(x=ages, y=y_sp_sal, name="配偶者 給与収入", offsetgroup=1, base=base_inc, customdata=y_sp_sal, marker_color='#76b7b2', hovertemplate='%{customdata:.1f}万円'))
-    base_inc += y_sp_sal
-
-    y_pen = arr_pension/10000
-    fig.add_trace(go.Bar(x=ages, y=y_pen, name="本人 年金・保険等", offsetgroup=1, base=base_inc, customdata=y_pen, marker_color='#2ca02c', hovertemplate='%{customdata:.1f}万円'))
-    base_inc += y_pen
-    
-    y_ret = arr_ret_income/10000
-    fig.add_trace(go.Bar(x=ages, y=y_ret, name="退職金(手取り)", offsetgroup=1, base=base_inc, customdata=y_ret, marker_color='#17becf', hovertemplate='%{customdata:.1f}万円'))
-    base_inc += y_ret
-
-    y_leave = arr_leave_benefit/10000
-    fig.add_trace(go.Bar(x=ages, y=y_leave, name="育休給付金(非課税)", offsetgroup=1, base=base_inc, customdata=y_leave, marker_color='#9edae5', hovertemplate='%{customdata:.1f}万円'))
-    base_inc += y_leave
-
-    y_child_allowance = arr_child_allowance/10000
-    fig.add_trace(go.Bar(x=ages, y=y_child_allowance, name="児童手当", offsetgroup=1, base=base_inc, customdata=y_child_allowance, marker_color='#ff9896', hovertemplate='%{customdata:.1f}万円'))
-    base_inc += y_child_allowance
-    
-    y_lump = arr_lump_sum_income/10000
-    fig.add_trace(go.Bar(x=ages, y=y_lump, name="一時収入(iDeCo等)", offsetgroup=1, base=base_inc, customdata=y_lump, marker_color='#ff7f0e', hovertemplate='%{customdata:.1f}万円'))
-    base_inc += y_lump
-
-    y_sp_pen = arr_sp_pension/10000
-    fig.add_trace(go.Bar(x=ages, y=y_sp_pen, name="配偶者 年金・iDeCo等", offsetgroup=1, base=base_inc, customdata=y_sp_pen, marker_color='#98df8a', hovertemplate='%{customdata:.1f}万円'))
-    base_inc += y_sp_pen
-
-    y_with = arr_withdrawal_amount/10000
-    fig.add_trace(go.Bar(x=ages, y=y_with, name="資産取崩・赤字補填", offsetgroup=1, base=base_inc, customdata=y_with, marker_color='#e377c2', hovertemplate='%{customdata:.1f}万円'))
-
     base_exp = np.zeros(years_count)
-    y_base = arr_exp_base/10000
-    fig.add_trace(go.Bar(x=ages, y=y_base, name="基本生活費", offsetgroup=2, base=base_exp, customdata=y_base, marker_color='#d62728', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_base
 
-    y_ins = arr_exp_insurance/10000
-    fig.add_trace(go.Bar(x=ages, y=y_ins, name="民間保険料(固定費)", offsetgroup=2, base=base_exp, customdata=y_ins, marker_color='#e377c2', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_ins
+    def add_cf_bar(arr_yen, name, group, base_arr, color):
+        # 全期間を通して0円の項目は凡例・グラフ自体に追加しない
+        if np.all(arr_yen < 5000):
+            return
+        y_man = arr_yen / 10000.0
+        active_mask = y_man >= 0.5
+        # その年の金額が0円（0.5万円未満）の箇所は y も base も NaN にしてポップアップから完全に消す
+        y_plot = np.where(active_mask, y_man, np.nan)
+        base_plot = np.where(active_mask, base_arr, np.nan)
+        fig.add_trace(go.Bar(
+            x=ages,
+            y=y_plot,
+            name=name,
+            offsetgroup=group,
+            base=base_plot,
+            customdata=format_man_oku_array(arr_yen),
+            marker_color=color,
+            hovertemplate='%{customdata}'
+        ))
+        base_arr += np.where(active_mask, y_man, 0.0)
 
-    y_event = arr_exp_event/10000
-    fig.add_trace(go.Bar(x=ages, y=y_event, name="特別支出(イベント)", offsetgroup=2, base=base_exp, customdata=y_event, marker_color='#ffbb78', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_event
+    # 収入グループ (offsetgroup=1)
+    add_cf_bar(arr_salary, "本人 給与収入", 1, base_inc, '#1f77b4')
+    add_cf_bar(arr_sp_salary, "配偶者 給与収入", 1, base_inc, '#76b7b2')
+    add_cf_bar(arr_pension, "本人 年金・保険等", 1, base_inc, '#2ca02c')
+    add_cf_bar(arr_ret_income, "退職金(手取り)", 1, base_inc, '#17becf')
+    add_cf_bar(arr_leave_benefit, "育休給付金(非課税)", 1, base_inc, '#9edae5')
+    add_cf_bar(arr_child_allowance, "児童手当", 1, base_inc, '#ff9896')
+    add_cf_bar(arr_lump_sum_income, "一時収入(iDeCo等)", 1, base_inc, '#ff7f0e')
+    add_cf_bar(arr_sp_pension, "配偶者 年金・iDeCo等", 1, base_inc, '#98df8a')
+    add_cf_bar(arr_withdrawal_amount, "資産取崩・赤字補填", 1, base_inc, '#e377c2')
 
-    y_house = arr_exp_house/10000
-    fig.add_trace(go.Bar(x=ages, y=y_house, name="住宅費", offsetgroup=2, base=base_exp, customdata=y_house, marker_color='#8c564b', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_house
+    # 支出グループ (offsetgroup=2)
+    add_cf_bar(arr_exp_base, "基本生活費", 2, base_exp, '#d62728')
+    add_cf_bar(arr_exp_support, "子どもへの仕送り", 2, base_exp, '#ff9896')
+    add_cf_bar(arr_exp_ideco_savings_ins, "iDeCo・貯蓄型保険掛金", 2, base_exp, '#aec7e8')
+    add_cf_bar(arr_exp_insurance, "民間保険料(固定費)", 2, base_exp, '#e377c2')
+    add_cf_bar(arr_exp_event, "特別支出(イベント)", 2, base_exp, '#ffbb78')
+    add_cf_bar(arr_exp_house, "住宅費", 2, base_exp, '#8c564b')
+    add_cf_bar(arr_exp_edu, "教育費", 2, base_exp, '#bcbd22')
+    add_cf_bar(arr_exp_car, "自動車費(世帯)", 2, base_exp, '#7f7f7f')
+    add_cf_bar(arr_exp_nursing, "老人ホーム費用(世帯)", 2, base_exp, '#c49c94')
+    add_cf_bar(arr_soc_ins, "本人 社会保険料", 2, base_exp, '#ff7f0e')
+    add_cf_bar(arr_sp_soc_ins, "配偶者 社会保険料", 2, base_exp, '#ffbb78')
+    add_cf_bar(arr_inc_tax, "本人 所得税", 2, base_exp, '#9467bd')
+    add_cf_bar(arr_sp_inc_tax, "配偶者 所得税", 2, base_exp, '#c5b0d5')
+    add_cf_bar(arr_res_tax, "本人 住民税", 2, base_exp, '#17becf')
+    add_cf_bar(arr_sp_res_tax, "配偶者 住民税", 2, base_exp, '#9edae5')
+    add_cf_bar(arr_ret_inc_tax + arr_ret_res_tax, "退職関連税(世帯)", 2, base_exp, '#000000')
 
-    y_edu = arr_exp_edu/10000
-    fig.add_trace(go.Bar(x=ages, y=y_edu, name="教育費", offsetgroup=2, base=base_exp, customdata=y_edu, marker_color='#bcbd22', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_edu
+    max_cf = max(500, float(np.max(base_inc)), float(np.max(base_exp)))
+    t_vals_cf, t_text_cf = get_jp_axis_ticks(0, max_cf)
 
-    y_car = arr_exp_car/10000
-    fig.add_trace(go.Bar(x=ages, y=y_car, name="自動車費(世帯)", offsetgroup=2, base=base_exp, customdata=y_car, marker_color='#7f7f7f', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_car
-
-    y_nursing = arr_exp_nursing/10000
-    fig.add_trace(go.Bar(x=ages, y=y_nursing, name="老人ホーム費用(世帯)", offsetgroup=2, base=base_exp, customdata=y_nursing, marker_color='#c49c94', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_nursing
-
-    y_soc = arr_soc_ins/10000
-    fig.add_trace(go.Bar(x=ages, y=y_soc, name="本人 社会保険料", offsetgroup=2, base=base_exp, customdata=y_soc, marker_color='#ff7f0e', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_soc
-
-    y_sp_soc = arr_sp_soc_ins/10000
-    fig.add_trace(go.Bar(x=ages, y=y_sp_soc, name="配偶者 社会保険料", offsetgroup=2, base=base_exp, customdata=y_sp_soc, marker_color='#ffbb78', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_sp_soc
-
-    y_inc_tax = arr_inc_tax/10000
-    fig.add_trace(go.Bar(x=ages, y=y_inc_tax, name="本人 所得税", offsetgroup=2, base=base_exp, customdata=y_inc_tax, marker_color='#9467bd', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_inc_tax
-
-    y_sp_inc_tax = arr_sp_inc_tax/10000
-    fig.add_trace(go.Bar(x=ages, y=y_sp_inc_tax, name="配偶者 所得税", offsetgroup=2, base=base_exp, customdata=y_sp_inc_tax, marker_color='#c5b0d5', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_sp_inc_tax
-
-    y_res_tax = arr_res_tax/10000
-    fig.add_trace(go.Bar(x=ages, y=y_res_tax, name="本人 住民税", offsetgroup=2, base=base_exp, customdata=y_res_tax, marker_color='#17becf', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_res_tax
-
-    y_sp_res_tax = arr_sp_res_tax/10000
-    fig.add_trace(go.Bar(x=ages, y=y_sp_res_tax, name="配偶者 住民税", offsetgroup=2, base=base_exp, customdata=y_sp_res_tax, marker_color='#9edae5', hovertemplate='%{customdata:.1f}万円'))
-    base_exp += y_sp_res_tax
-
-    y_ret_tax = (arr_ret_inc_tax + arr_ret_res_tax) / 10000
-    fig.add_trace(go.Bar(x=ages, y=y_ret_tax, name="退職関連税(世帯)", offsetgroup=2, base=base_exp, customdata=y_ret_tax, marker_color='#000000', hovertemplate='%{customdata:.1f}万円'))
-
-    fig.update_xaxes(fixedrange=True)
-    fig.update_yaxes(fixedrange=True)
+    fig.update_xaxes(fixedrange=True, ticksuffix="歳")
+    if t_vals_cf:
+        fig.update_yaxes(fixedrange=True, tickvals=t_vals_cf, ticktext=t_text_cf)
+    else:
+        fig.update_yaxes(fixedrange=True, tickformat=",d", ticksuffix="万円")
     fig.update_layout(dragmode=False, barmode='group', hovermode="x unified", height=650, legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5))
     return fig
 
@@ -479,7 +642,7 @@ with tabs[0]:
     col1, col2 = st.columns(2)
     with col1:
         current_age = st.number_input("現在の年齢", min_value=20, max_value=80, value=get_val("current_age", 40), step=1)
-        life_expectancy = st.number_input("シミュレーション終了年齢", min_value=80, max_value=110, value=get_val("life_expectancy", 95), step=1)
+        life_expectancy = st.number_input("シミュレーション終了年齢", min_value=80, max_value=110, value=get_val("life_expectancy", 90), step=1)
         employment_start_age = st.number_input("入社(就業開始)年齢", min_value=15, max_value=65, value=get_val("employment_start_age", 22), step=1)
         is_working = st.radio("現在の就業状況(本人)", ["就業中（給与収入あり）", "既に退職済み（早期リタイア等）"], index=0 if get_val("is_working", "就業中（給与収入あり）") == "就業中（給与収入あり）" else 1)
     
@@ -620,9 +783,21 @@ with tabs[2]:
     st.header("家族・教育費")
     receive_child_allowance = st.checkbox("児童手当（こども手当）を受給する", value=get_val("receive_child_allowance", True))
     
-    num_children = st.number_input("子どもの人数", min_value=0, max_value=6, value=get_val("num_children", 0), step=1)
+    with st.expander("📝 教育費の平均コスト目安表 (年額・万円) を見る"):
+        st.markdown(f"""
+        | 教育段階 | 公立・国公立 (年額) | 私立・その他 (年額) |
+        | :--- | :--- | :--- |
+        | **幼稚園** (3年間) | **{EDU_COST["幼稚園(公立)"]} 万円** | **{EDU_COST["幼稚園(私立)"]} 万円** |
+        | **小学校** (6年間) | **{EDU_COST["小学校(公立)"]} 万円** | **{EDU_COST["小学校(私立)"]} 万円** |
+        | **中学校** (3年間) | **{EDU_COST["中学校(公立)"]} 万円** | **{EDU_COST["中学校(私立)"]} 万円** |
+        | **高校** (3年間) | **{EDU_COST["高校(公立)"]} 万円** | **{EDU_COST["高校(私立)"]} 万円** |
+        | **大学・短大・専門** | **国公立大: {EDU_COST["国公立大学(4年)"]} 万円** | **私立文系: {EDU_COST["私立大学文系(4年)"]} 万円** ／ **私立理系: {EDU_COST["私立大学理系(4年)"]} 万円** ／ **短大・専門: {EDU_COST["短大(2年)"]} 万円** |
+        """)
+
+    num_children = st.number_input("子どもの人数", min_value=0, max_value=6, value=get_val("num_children", 0), step=1)    
+
     child_settings = []
-    
+
     if num_children > 0:
         for i in range(num_children):
             if i % 3 == 0:
@@ -850,120 +1025,72 @@ with tabs[4]:
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("本人")
-        initial_savings = st.number_input("現在の預貯金(本人・万円)", value=int(get_val("initial_savings", 1000000)/10000), step=10) * 10000
-        initial_nisa = st.number_input("現在のNISA残高(本人・万円)", value=int(get_val("initial_nisa", 0)/10000), step=10) * 10000
-        initial_taxable = st.number_input("現在の特定口座残高(本人・万円)", value=int(get_val("initial_taxable", 0)/10000), step=10) * 10000
-        nisa_used_tsumitate = st.number_input("NISA つみたて投資枠利用済額(本人・万円)", value=int(get_val("nisa_used_tsumitate", 0)/10000), step=10) * 10000
-        nisa_used_growth = st.number_input("NISA 成長投資枠利用済額(本人・万円)", value=int(get_val("nisa_used_growth", 0)/10000), step=10) * 10000
+        initial_savings = st.number_input("現在の預貯金(本人・万円)", min_value=0, value=int(get_val("initial_savings", 3000000)/10000), step=10) * 10000
+        initial_nisa = st.number_input("現在のNISA残高(本人・万円)", min_value=0, value=int(get_val("initial_nisa", 10000000)/10000), step=10) * 10000
+        initial_taxable = st.number_input("現在の特定口座残高(本人・万円)", min_value=0, value=int(get_val("initial_taxable", 10000000)/10000), step=10) * 10000
+        
+        default_nisa_used = get_val("nisa_used_total", get_val("nisa_used_tsumitate", 0) + get_val("nisa_used_growth", 0))
+        nisa_used_total = safe_number_input("NISA 生涯投資枠の利用済額(本人・万円 / 上限1800万)", min_value=0, max_value=1800, default_value=int(default_nisa_used/10000), step=10, help="つみたて投資枠と成長投資枠を合わせた、これまでの元本利用済額を入力してください。") * 10000
+        nisa_used_tsumitate = nisa_used_total
+        nisa_used_growth = 0
         
         has_investment = st.checkbox("新規の積立投資を行う(本人)", value=get_val("has_investment", True))
         if has_investment:
-            invest_monthly = st.number_input("毎月の積立額(本人・万円)", value=int(get_val("invest_monthly", 50000)/10000), step=1) * 10000
-            invest_end_age = st.number_input("積立を終了する本人の年齢", min_value=current_age, max_value=100, value=get_val("invest_end_age", 60), step=1)
-            inv_opts = ["NISA優先 (年間360万/生涯1800万上限、超過分は特定口座)", "すべて特定口座へ"]
-            saved_inv = get_val("invest_strategy", "NISA優先 (年間360万/生涯1800万上限、超過分は特定口座)")
-            invest_strategy = st.radio("積立の優先順位(本人)", inv_opts, index=inv_opts.index(saved_inv) if saved_inv in inv_opts else 0)
+            invest_monthly = st.number_input("毎月の積立額(本人・万円)", min_value=0.0, value=float(get_val("invest_monthly", 150000)/10000), step=1.0) * 10000
+            invest_end_age = safe_number_input("積立を終了する本人の年齢", min_value=current_age, max_value=110, default_value=get_val("invest_end_age", 60), step=1)
+            invest_strategy = "NISA優先 (年間360万/生涯1800万上限、超過分は特定口座)"
+            st.caption("💡 積立は自動的に「NISA枠（年間360万・生涯1,800万の残り枠）を最優先」で埋め、枠を超えた分は「特定口座」へ投資されます。")
         else:
             invest_monthly = invest_end_age = 0
             invest_strategy = "すべて特定口座へ"
             
-        withdrawal_start_age = st.number_input("定率取り崩し開始年齢(本人)", min_value=current_age, max_value=100, value=get_val("withdrawal_start_age", retirement_age), step=1)
-        withdrawal_rate_nisa = st.number_input("NISA 定率取り崩し率(本人) (%)", min_value=0.0, max_value=10.0, value=get_val("withdrawal_rate_nisa", 0.04)*100, step=0.1) / 100
-        withdrawal_rate_taxable = st.number_input("特定口座 定率取り崩し率(本人) (%)", min_value=0.0, max_value=10.0, value=get_val("withdrawal_rate_taxable", 0.04)*100, step=0.1) / 100
+        withdrawal_start_age = safe_number_input("定率取り崩し開始年齢(本人)", min_value=current_age, max_value=110, default_value=get_val("withdrawal_start_age", retirement_age), step=1)
+        withdrawal_rate_nisa = safe_number_input("NISA 定率取り崩し率(本人) (%)", min_value=0.0, max_value=100.0, default_value=float(get_val("withdrawal_rate_nisa", 0.04)*100), step=0.1) / 100
+        withdrawal_rate_taxable = safe_number_input("特定口座 定率取り崩し率(本人) (%)", min_value=0.0, max_value=100.0, default_value=float(get_val("withdrawal_rate_taxable", 0.04)*100), step=0.1) / 100
 
     with col2:
         st.subheader("配偶者")
         if has_marriage:
-            sp_initial_savings = st.number_input("現在の預貯金(配偶者・万円)", value=int(get_val("sp_initial_savings", 500000)/10000), step=10) * 10000
-            sp_initial_nisa = st.number_input("現在のNISA残高(配偶者・万円)", value=int(get_val("sp_initial_nisa", 0)/10000), step=10) * 10000
-            sp_initial_taxable = st.number_input("現在の特定口座残高(配偶者・万円)", value=int(get_val("sp_initial_taxable", 0)/10000), step=10) * 10000
-            sp_nisa_used_tsumitate = st.number_input("NISA つみたて利用済額(配偶者・万円)", value=int(get_val("sp_nisa_used_tsumitate", 0)/10000), step=10) * 10000
-            sp_nisa_used_growth = st.number_input("NISA 成長投資枠利用済額(配偶者・万円)", value=int(get_val("sp_nisa_used_growth", 0)/10000), step=10) * 10000
+            sp_initial_savings = st.number_input("現在の預貯金(配偶者・万円)", min_value=0, value=int(get_val("sp_initial_savings", 500000)/10000), step=10) * 10000
+            sp_initial_nisa = st.number_input("現在のNISA残高(配偶者・万円)", min_value=0, value=int(get_val("sp_initial_nisa", 0)/10000), step=10) * 10000
+            sp_initial_taxable = st.number_input("現在の特定口座残高(配偶者・万円)", min_value=0, value=int(get_val("sp_initial_taxable", 0)/10000), step=10) * 10000
+            
+            default_sp_nisa_used = get_val("sp_nisa_used_total", get_val("sp_nisa_used_tsumitate", 0) + get_val("sp_nisa_used_growth", 0))
+            sp_nisa_used_total = safe_number_input("NISA 生涯投資枠の利用済額(配偶者・万円 / 上限1800万)", min_value=0, max_value=1800, default_value=int(default_sp_nisa_used/10000), step=10) * 10000
+            sp_nisa_used_tsumitate = sp_nisa_used_total
+            sp_nisa_used_growth = 0
             
             sp_has_investment = st.checkbox("新規の積立投資を行う(配偶者)", value=get_val("sp_has_investment", False))
             if sp_has_investment:
-                sp_invest_monthly = st.number_input("毎月の積立額(配偶者・万円)", value=int(get_val("sp_invest_monthly", 30000)/10000), step=1) * 10000
-                sp_invest_end_age = st.number_input("積立を終了する配偶者の年齢", min_value=current_age + sp_age_diff, max_value=100, value=get_val("sp_invest_end_age", 60), step=1)
-                sp_inv_opts = ["NISA優先", "すべて特定口座へ"]
-                saved_sp_inv = get_val("sp_invest_strategy", "NISA優先")
-                sp_invest_strategy = st.radio("積立の優先順位(配偶者)", sp_inv_opts, index=sp_inv_opts.index(saved_sp_inv) if saved_sp_inv in sp_inv_opts else 0)
+                sp_invest_monthly = st.number_input("毎月の積立額(配偶者・万円)", min_value=0.0, value=float(get_val("sp_invest_monthly", 30000)/10000), step=1.0) * 10000
+                sp_invest_end_age = safe_number_input("積立を終了する配偶者の年齢", min_value=current_age + sp_age_diff, max_value=110, default_value=get_val("sp_invest_end_age", 60), step=1)
+                sp_invest_strategy = "NISA優先"
+                st.caption("💡 配偶者の積立も「NISA枠（年間360万・生涯1,800万上限）優先 → 超過分は特定口座」へ自動投資されます。")
             else:
                 sp_invest_monthly = sp_invest_end_age = 0
                 sp_invest_strategy = "すべて特定口座へ"
                 
-            sp_withdrawal_start_age = st.number_input("定率取り崩し開始年齢(配偶者)", min_value=current_age + sp_age_diff, max_value=100, value=get_val("sp_withdrawal_start_age", sp_retirement_age), step=1)
-            sp_withdrawal_rate_nisa = st.number_input("NISA 定率取り崩し率(配偶者) (%)", min_value=0.0, max_value=10.0, value=get_val("sp_withdrawal_rate_nisa", 0.04)*100, step=0.1) / 100
-            sp_withdrawal_rate_taxable = st.number_input("特定口座 定率取り崩し率(配偶者) (%)", min_value=0.0, max_value=10.0, value=get_val("sp_withdrawal_rate_taxable", 0.04)*100, step=0.1) / 100
+            sp_withdrawal_start_age = safe_number_input("定率取り崩し開始年齢(配偶者)", min_value=current_age + sp_age_diff, max_value=110, default_value=get_val("sp_withdrawal_start_age", sp_retirement_age), step=1)
+            sp_withdrawal_rate_nisa = safe_number_input("NISA 定率取り崩し率(配偶者) (%)", min_value=0.0, max_value=100.0, default_value=float(get_val("sp_withdrawal_rate_nisa", 0.04)*100), step=0.1) / 100
+            sp_withdrawal_rate_taxable = safe_number_input("特定口座 定率取り崩し率(配偶者) (%)", min_value=0.0, max_value=100.0, default_value=float(get_val("sp_withdrawal_rate_taxable", 0.04)*100), step=0.1) / 100
         else:
-            sp_initial_savings = sp_initial_nisa = sp_initial_taxable = sp_nisa_used_tsumitate = sp_nisa_used_growth = 0
+            sp_initial_savings = sp_initial_nisa = sp_initial_taxable = sp_nisa_used_total = sp_nisa_used_tsumitate = sp_nisa_used_growth = 0
             sp_has_investment = False
             sp_invest_monthly = sp_invest_end_age = 0
             sp_invest_strategy = "すべて特定口座へ"
             sp_withdrawal_start_age = sp_withdrawal_rate_nisa = sp_withdrawal_rate_taxable = 0
 
+    # ▼▼▼ 1. 預貯金の最低維持（温存）ライン設定 ▼▼▼
     st.divider()
-    st.subheader("シミュレーション・リターン設定")
-    sim_opts = ["定率シミュレーション（基本）", "モンテカルロシミュレーション（リスク・暴落を考慮）"]
-    saved_sim = get_val("sim_mode", "定率シミュレーション（基本）")
-    sim_mode = st.radio("シミュレーション方式を選択", sim_opts, index=sim_opts.index(saved_sim) if saved_sim in sim_opts else 0)
-    st.caption("※「モンテカルロ」を選択すると、設定したリスク（標準偏差）に基づくランダムな相場推移をシミュレーションします。")
-    
-    st.markdown("**■ 基本リターン設定（NISA・特定口座 共通）**")
-    col_ret1, col_ret2 = st.columns(2)
-    with col_ret1:
-        expected_return = st.number_input("期待リターン (%)", min_value=0.0, max_value=20.0, value=get_val("expected_return", 0.08)*100, step=0.1) / 100
-    with col_ret2:
-        if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
-            risk_std = st.number_input("標準偏差/基本リスク (%)", min_value=0.0, max_value=50.0, value=get_val("risk_std", 0.18)*100, step=0.1) / 100
-        else:
-            risk_std = 0.0
-
-    with st.expander("📊 ポートフォリオ別のリターン・リスク入力目安表を開く"):
-        st.markdown("""
-        | 運用スタイル (資産配分) | 期待リターン (名目) | リスク (標準偏差) | 特徴 |
-        | :--- | :--- | :--- | :--- |
-        | **超積極型** (株式 100%) | **8.0 %** | **18.0 %** | 上振れも凄いが、暴落のダメージも直撃する。（★現在の初期値） |
-        | **積極型** (株式 70% / 債券等 30%) | **6.5 %** | **13.0 %** | リターンを狙いつつ、暴落時のショックをある程度和らげる王道スタイル。 |
-        | **バランス型** (株式 50% / 債券等 50%) | **5.0 %** | **10.0 %** | リスクが大きく下がるため、悲観シナリオでも資産が安定して長持ちしやすい。 |
-        | **保守型** (株式 30% / 債券等 70%) | **3.5 %** | **6.5 %** | インフレ負けを防ぐ最低限の運用。取り崩し期（老後）に入ってからの基本戦略。 |
-        """)
-            
-    if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
-        st.markdown("**■ ランダム暴落（ファットテール）設定**", help="通常の相場変動に加えて、突発的な大暴落が起こる確率と規模を設定します。0%にすると純粋な正規分布になります。")
-        col_mc1, col_mc2, col_mc3 = st.columns(3)
-        with col_mc1:
-            mc_crash_prob = st.number_input("発生確率(年率 %)", min_value=0.0, max_value=50.0, value=get_val("mc_crash_prob", 5.0), step=1.0) / 100
-        with col_mc2:
-            mc_crash_min = st.number_input("下落幅の下限(%)", min_value=0.0, max_value=99.0, value=get_val("mc_crash_min", 15.0), step=1.0) / 100
-        with col_mc3:
-            mc_crash_max = st.number_input("下落幅の上限(%)", min_value=0.0, max_value=99.0, value=get_val("mc_crash_max", 30.0), step=1.0) / 100
-    else:
-        mc_crash_prob = mc_crash_min = mc_crash_max = 0.0
-        
-    st.caption("※簡易計算のため、特定口座の複利運用は毎年課税（税引後リターン適用）されている前提で算出します。")
-    
-    st.markdown("---")
-    st.markdown("**■ 暴落（ショック）イベント設定**")
-    has_market_shock = st.checkbox("特定の年齢で相場の大暴落を発生させる（ストレステスト）", value=get_val("has_market_shock", False))
-    if has_market_shock:
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            shock_age = st.number_input("暴落が発生する本人の年齢", min_value=current_age, max_value=100, value=get_val("shock_age", retirement_age), step=1)
-        with col_s2:
-            shock_drop_rate = st.number_input("下落率 (%)", min_value=1.0, max_value=99.0, value=get_val("shock_drop_rate", 0.30)*100, step=1.0) / 100
-    else:
-        shock_age = 1000
-        shock_drop_rate = 0.0
-
-    st.divider()
+    st.subheader("預貯金の維持ライン・暴落待機資金ルール")
     st.markdown("**■ 預貯金の最低維持（温存）ライン設定**")
     st.write("※生活防衛資金やポートフォリオの現金比率など、取り崩さずに確保しておきたい現金の目標水準を設定します。")
     
     col_m1, col_m2 = st.columns(2)
     with col_m1:
-        min_savings_amount = st.number_input("最低維持額（定額・万円）", value=int(get_val("min_savings_amount", 1500000)/10000), step=10) * 10000
+        min_savings_amount = st.number_input("最低維持額（定額・万円）", min_value=0, value=int(get_val("min_savings_amount", 1500000)/10000), step=10) * 10000
     with col_m2:
-        min_savings_rate = st.number_input("最低維持率（総資産の %）", min_value=0.0, max_value=100.0, value=get_val("min_savings_rate", 5.0), step=1.0) / 100
+        min_savings_rate = safe_number_input("最低維持率（総資産の %）", min_value=0.0, max_value=100.0, default_value=get_pct_val("min_savings_rate", 5.0), step=0.5) / 100
         
     min_save_opts = ["金額が高い方を採用", "金額が低い方を採用", "定額のみを採用", "定率のみを採用"]
     saved_min_rule = get_val("min_savings_rule", "金額が高い方を採用")
@@ -983,6 +1110,170 @@ with tabs[4]:
         
     deficit_order = st.selectbox("赤字補填の優先順位", def_opts, index=def_opts.index(saved_def) if saved_def in def_opts else 0)
 
+    # ▼▼▼ 2. 預貯金の最高維持ライン（上限キャップ）設定 ▼▼▼
+    st.divider()
+    st.markdown("**■ 預貯金の最高維持（上限）ライン ＆ 余剰キャッシュ自動投資設定**")
+    st.write("※預貯金が増えすぎて現金が遊んでしまうのを防ぐため、保有する預貯金の最高維持ラインを設定し、それを超えた分を自動的に投資へ回します。")
+    has_max_savings_cap = st.checkbox("預貯金の最高維持ラインを設定し、超過分を自動で投資へ回す", value=get_val("has_max_savings_cap", False))
+    if has_max_savings_cap:
+        col_mx1, col_mx2 = st.columns(2)
+        with col_mx1:
+            max_savings_amount = st.number_input("最高維持額（定額・万円）", min_value=0, value=int(get_val("max_savings_amount", 5000000)/10000), step=10) * 10000
+        with col_mx2:
+            max_savings_rate = safe_number_input("最高維持率（総資産の %）", min_value=0.0, max_value=100.0, default_value=get_pct_val("max_savings_rate", 20.0), step=0.5) / 100
+            
+        max_save_opts = ["金額が高い方を採用", "金額が低い方を採用", "定額のみを採用", "定率のみを採用"]
+        saved_max_rule = get_val("max_savings_rule", "金額が高い方を採用")
+        max_savings_rule = st.radio("最高維持基準の適用方法（最低維持基準とは別に設定可能）", max_save_opts, index=max_save_opts.index(saved_max_rule) if saved_max_rule in max_save_opts else 0, key="max_sav_rule_radio")
+        
+        st.caption("💡 **超過分の投資ルール（NISA優先）：** 預貯金の最低維持ラインおよび暴落待機資金（上限枠）を確保した上で、この最高維持ラインを超えた余剰預貯金は、**自動的に「NISA枠（年間投資枠360万円・生涯非課税限度額1,800万円の残り枠）を最優先」で埋め、あふれた分を「特定口座」へ積立投資**します。（※計算上、最低維持ラインの方が高くなった場合は最低維持ラインの確保が優先されます）")
+    else:
+        max_savings_amount = 1000000000
+        max_savings_rate = 1.0
+        max_savings_rule = "金額が高い方を採用"
+
+    # ▼▼▼ 3. 暴落時の追加投資用待機資金（ドライパウダー）設定 ▼▼▼
+    st.divider()
+    st.markdown("**■ 暴落時の追加投資用待機資金（ドライパウダー）設定**")
+    st.write("※生活防衛資金（預貯金の最低維持ライン）とは別枠で、暴落時に安く買い向かうための待機資金プールと段階的投入ルールを設定します。")
+    has_dry_powder = st.checkbox("暴落時の追加投資用待機資金（ドライパウダー）を運用する", value=get_val("has_dry_powder", False))
+    if has_dry_powder:
+        col_dp1, col_dp2 = st.columns(2)
+        with col_dp1:
+            initial_dry_powder = st.number_input("現在の待機資金残高（万円）", min_value=0, value=int(get_val("initial_dry_powder", 2000000)/10000), step=10) * 10000
+        with col_dp2:
+            dp_yield = safe_number_input("待機資金の平時運用利回り (年率 %)", min_value=-10.0, max_value=100.0, default_value=float(get_val("dp_yield", 0.01)*100), step=0.1, help="個人向け国債・MMF・高金利預金など、待機中の利回り（税引前）") / 100
+
+        st.markdown("**💧 待機資金の目標上限（プール枠）設定**")
+        col_dpm1, col_dpm2 = st.columns(2)
+        with col_dpm1:
+            dp_max_cap = st.number_input("待機資金の目標上限額（定額・万円）", min_value=0, value=int(get_val("dp_max_cap", 3000000)/10000), step=10, help="定額での待機資金プール目標上限です。") * 10000
+        with col_dpm2:
+            dp_max_rate = safe_number_input("待機資金の目標上限率（総資産の %）", min_value=0.0, max_value=100.0, default_value=get_pct_val("dp_max_rate", 10.0), step=0.5, help="総資産に対する比率での待機資金プール目標上限です。") / 100
+
+        dp_rule_opts = ["金額が高い方を採用", "金額が低い方を採用", "定額のみを採用", "定率のみを採用"]
+        saved_dp_rule = get_val("dp_max_rule", "定額のみを採用")
+        dp_max_rule = st.radio("待機資金の上限基準の適用方法", dp_rule_opts, index=dp_rule_opts.index(saved_dp_rule) if saved_dp_rule in dp_rule_opts else 2, key="dp_max_rule_radio")
+
+        dp_refill_opts = [
+            "待機資金のプールを最優先（最低維持ラインを超えた余剰分は、まず待機資金の上限枠まで優先補充し、残りで通常積立を行う）",
+            "通常の毎月積立を優先（毎月の積立投資を行った後、まだ最低維持ラインを超える余剰預貯金があれば待機資金へ補充する）"
+        ]
+        saved_dp_refill = get_val("dp_refill_priority", dp_refill_opts[0])
+        dp_refill_priority = st.radio("平時の待機資金プール（補充）の優先順位", dp_refill_opts, index=dp_refill_opts.index(saved_dp_refill) if saved_dp_refill in dp_refill_opts else 0)
+        st.caption("※家計収支が赤字等で預貯金が最低維持ライン以下の年や、暴落が発生した年は、待機資金への補充は自動的に停止します。また、利回りや資産変動により待機資金が上限枠を超えた超過分は、自動的に投資（NISA優先→特定口座）へ回されます。")
+
+        st.markdown("**🎯 暴落時の段階的買い向かい（ピラミッディング）ルール**")
+        col_dpr1, col_dpr2, col_dpr3 = st.columns(3)
+        with col_dpr1:
+            dp_step_drop = safe_number_input("発動の下落刻み幅 (%)", min_value=0.1, max_value=100.0, default_value=get_pct_val("dp_step_drop", 10.0), step=0.5, help="例: 10%に設定すると、-10%, -20%, -30%...と段階的に発動します。") / 100
+        with col_dpr2:
+            dp_step_rate = safe_number_input("1段階あたりの投入率係数 (%)", min_value=0.1, max_value=100.0, default_value=get_pct_val("dp_step_rate", 10.0), step=0.5, help="例: 10%に設定すると、1段目で10%、2段目で20%、3段目で30%を投入します。") / 100
+        with col_dpr3:
+            dp_full_drop = safe_number_input("全額(100%)投入する下落幅 (%)", min_value=0.1, max_value=100.0, default_value=get_pct_val("dp_full_drop", 50.0), step=1.0, help="年間リターンがこの下落幅に達した年は、残りの待機資金を100%全力投入します。") / 100
+
+        dp_calc_opts = [
+            "累積・残高基準（通過ステップごとにその時の残高の〇%を順次投入）",
+            "累積・当初枠基準（通過ステップの投入率を単純合算して投入）",
+            "単発判定（到達した最大ステップの〇%のみを投入）"
+        ]
+        saved_dp_calc = get_val("dp_calc_mode", dp_calc_opts[0])
+        dp_calc_mode = st.radio("年次シミュレーション上の段階投入の計算方式", dp_calc_opts, index=dp_calc_opts.index(saved_dp_calc) if saved_dp_calc in dp_calc_opts else 0)
+        
+        preview_texts = []
+        rem = 1.0
+        cum_sum = 0.0
+        step_idx = 1
+        while step_idx * dp_step_drop < dp_full_drop and step_idx <= 10:
+            drop_pct = step_idx * dp_step_drop * 100
+            stage_r = min(1.0, step_idx * dp_step_rate)
+            if dp_calc_mode == dp_calc_opts[0]:
+                rem *= (1.0 - stage_r)
+                total_r = (1.0 - rem) * 100
+            elif dp_calc_mode == dp_calc_opts[1]:
+                cum_sum = min(1.0, cum_sum + stage_r)
+                total_r = cum_sum * 100
+            else:
+                total_r = stage_r * 100
+            preview_texts.append(f"**-{drop_pct:g}%**時: 累計**{total_r:.1f}%**投入")
+            step_idx += 1
+        preview_texts.append(f"**-{dp_full_drop*100:g}%**以上: **100%（全額）**投入")
+        st.caption("💡 現在の設定による年間投入率の目安： " + " ／ ".join(preview_texts))
+    else:
+        initial_dry_powder = dp_max_cap = 0
+        dp_max_rate = 0.0
+        dp_max_rule = "定額のみを採用"
+        dp_yield = 0.0
+        dp_refill_priority = "待機資金のプールを最優先（最低維持ラインを超えた余剰分は、まず待機資金の上限枠まで優先補充し、残りで通常積立を行う）"
+        dp_step_drop = 0.10
+        dp_step_rate = 0.10
+        dp_full_drop = 0.50
+        dp_calc_mode = "累積・残高基準（通過ステップごとにその時の残高の〇%を順次投入）"
+
+    # ▼▼▼ 4. シミュレーション・リターン設定（タブ5の最後に配置） ▼▼▼
+    st.divider()
+    st.subheader("シミュレーション・リターン設定")
+    sim_opts = ["定率シミュレーション（基本）", "モンテカルロシミュレーション（リスク・暴落を考慮）"]
+    saved_sim = get_val("sim_mode", "定率シミュレーション（基本）")
+    sim_mode = st.radio("シミュレーション方式を選択", sim_opts, index=sim_opts.index(saved_sim) if saved_sim in sim_opts else 0)
+    st.caption("※「モンテカルロ」を選択すると、設定したリスク（標準偏差）に基づくランダムな相場推移をシミュレーションします。")
+    
+    if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
+        mc_pause_auto = st.checkbox(
+            "⚡ 数字の連続入力モード（入力中の自動再計算を一時停止し、ボタン押下で一括計算する）",
+            value=get_val("mc_pause_auto", False),
+            help="ONにすると、各タブで数字を変更しても勝手にはモンテカルロ計算が走らなくなり、サクサク入力できます。"
+        )
+    else:
+        mc_pause_auto = False
+    
+    st.markdown("**■ 基本リターン設定（NISA・特定口座 共通）**")
+    col_ret1, col_ret2 = st.columns(2)
+    with col_ret1:
+        expected_return = safe_number_input("期待リターン (%)", min_value=-50.0, max_value=100.0, default_value=float(get_val("expected_return", 0.08)*100), step=0.1) / 100
+    with col_ret2:
+        if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
+            risk_std = safe_number_input("標準偏差/基本リスク (%)", min_value=0.0, max_value=200.0, default_value=float(get_val("risk_std", 0.18)*100), step=0.1) / 100
+        else:
+            risk_std = 0.0
+
+    with st.expander("📊 ポートフォリオ別のリターン・リスク入力目安表を開く"):
+        st.markdown("""
+        | 運用スタイル (資産配分) | 期待リターン (名目) | リスク (標準偏差) | 特徴 |
+        | :--- | :--- | :--- | :--- |
+        | **超積極型** (株式 100%) | **8.0 %** | **18.0 %** | 上振れも凄いが、暴落のダメージも直撃する。（★現在の初期値） |
+        | **積極型** (株式 70% / 債券等 30%) | **6.5 %** | **13.0 %** | リターンを狙いつつ、暴落時のショックをある程度和らげる王道スタイル。 |
+        | **バランス型** (株式 50% / 債券等 50%) | **5.0 %** | **10.0 %** | リスクが大きく下がるため、悲観シナリオでも資産が安定して長持ちしやすい。 |
+        | **保守型** (株式 30% / 債券等 70%) | **3.5 %** | **6.5 %** | インフレ負けを防ぐ最低限の運用。取り崩し期（老後）に入ってからの基本戦略。 |
+        """)
+            
+    if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
+        st.markdown("**■ ランダム暴落（ファットテール）設定**", help="通常の相場変動に加えて、突発的な大暴落が起こる確率と規模を設定します。0%にすると純粋な正規分布になります。")
+        col_mc1, col_mc2, col_mc3 = st.columns(3)
+        with col_mc1:
+            mc_crash_prob = safe_number_input("発生確率(年率 %)", min_value=0.0, max_value=100.0, default_value=get_pct_val("mc_crash_prob", 5.0), step=0.5) / 100
+        with col_mc2:
+            mc_crash_min = safe_number_input("下落幅の下限(%)", min_value=0.0, max_value=100.0, default_value=get_pct_val("mc_crash_min", 15.0), step=1.0) / 100
+        with col_mc3:
+            mc_crash_max = safe_number_input("下落幅の上限(%)", min_value=0.0, max_value=100.0, default_value=get_pct_val("mc_crash_max", 30.0), step=1.0) / 100
+    else:
+        mc_crash_prob = mc_crash_min = mc_crash_max = 0.0
+        
+    st.caption("※簡易計算のため、特定口座の複利運用は毎年課税（税引後リターン適用）されている前提で算出します。")
+    
+    st.markdown("---")
+    st.markdown("**■ 暴落（ショック）イベント設定**")
+    has_market_shock = st.checkbox("特定の年齢で相場の大暴落を発生させる（ストレステスト）", value=get_val("has_market_shock", False))
+    if has_market_shock:
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            shock_age = safe_number_input("暴落が発生する本人の年齢", min_value=current_age, max_value=110, default_value=get_val("shock_age", retirement_age), step=1)
+        with col_s2:
+            shock_drop_rate = safe_number_input("下落率 (%)", min_value=0.0, max_value=100.0, default_value=float(get_val("shock_drop_rate", 0.30)*100), step=1.0) / 100
+    else:
+        shock_age = 1000
+        shock_drop_rate = 0.0
+
 with tabs[5]:
     st.header("公的年金・個人年金・保険・iDeCo")
     
@@ -996,7 +1287,7 @@ with tabs[5]:
     col_pen1, col_pen2 = st.columns(2)
     with col_pen1:
         st.markdown("**本人の公的年金**")
-        pension_base = st.number_input("65歳時の年金見込額(額面・万円)(本人)", value=int(get_val("pension_base", 2400000)/10000), step=10) * 10000
+        pension_base = st.number_input("65歳時の年金見込額(額面・万円)(本人)", value=int(get_val("pension_base", 1200000)/10000), step=10) * 10000
         pension_start_age = st.number_input("年金受給開始年齢(本人)", min_value=60, max_value=75, value=get_val("pension_start_age", 65), step=1)
         
     with col_pen2:
@@ -1259,8 +1550,17 @@ with tabs[6]:
         base_exp_20s = base_exp_30s = base_exp_40s = base_exp_50s = base_exp_60s = base_exp_70s_plus = 0
         
     inflation_rate = st.number_input("インフレ率 (%)", min_value=0.0, max_value=5.0, value=get_val("inflation_rate", 0.015)*100, step=0.1) / 100
-    future_tax_rate = st.number_input("将来の金融課税率 (%)", min_value=20.0, max_value=50.0, value=get_val("future_tax_rate", 0.20)*100, step=1.0) / 100
-    tax_change_age = st.number_input("増税される本人の年齢", min_value=current_age, max_value=80, value=get_val("tax_change_age", current_age + 10), step=1)
+    
+    has_tax_increase = st.checkbox("将来の金融所得課税の引き上げ（増税）を想定する", value=get_val("has_tax_increase", float(get_val("future_tax_rate", 0.20)) > 0.20))
+    if has_tax_increase:
+        col_tx1, col_tx2 = st.columns(2)
+        with col_tx1:
+            future_tax_rate = st.number_input("引き上げ後の金融課税率 (%)", min_value=20.0, max_value=50.0, value=max(25.0, float(get_val("future_tax_rate", 0.25))*100), step=1.0) / 100
+        with col_tx2:
+            tax_change_age = st.number_input("増税される本人の年齢", min_value=current_age, max_value=100, value=get_val("tax_change_age", current_age + 10), step=1)
+    else:
+        future_tax_rate = 0.20
+        tax_change_age = 1000
 
     st.markdown("---")
     st.subheader("不定期なライフイベント（特別支出）")
@@ -1289,9 +1589,9 @@ with tabs[6]:
     if has_guardrail:
         col_g1, col_g2 = st.columns(2)
         with col_g1:
-            guardrail_trigger = st.number_input("発動条件: 年間リターンが何%下落(マイナス)したら", min_value=1.0, max_value=99.0, value=get_val("guardrail_trigger", 15.0), step=1.0) / 100
+            guardrail_trigger = safe_number_input("発動条件: 年間リターンが何%下落(マイナス)したら", min_value=0.1, max_value=100.0, default_value=get_pct_val("guardrail_trigger", 15.0), step=1.0) / 100
         with col_g2:
-            guardrail_cut = st.number_input("カット率: その年の生活費・イベント費を何%削減するか", min_value=1.0, max_value=99.0, value=get_val("guardrail_cut", 15.0), step=1.0) / 100
+            guardrail_cut = safe_number_input("カット率: その年の生活費・イベント費を何%削減するか", min_value=0.1, max_value=100.0, default_value=get_pct_val("guardrail_cut", 15.0), step=1.0) / 100
     else:
         guardrail_trigger = 0.0
         guardrail_cut = 0.0
@@ -1372,7 +1672,7 @@ try:
     ages = list(range(current_age, life_expectancy + 1))
     years_count = len(ages)
 
-    def run_simulation(return_arr):
+    def run_simulation(return_arr, enable_defense=True):
         arr_salary, arr_sp_salary = np.zeros(years_count), np.zeros(years_count)
         arr_pension, arr_sp_pension = np.zeros(years_count), np.zeros(years_count)
         arr_other_misc_income = np.zeros(years_count)
@@ -1387,6 +1687,8 @@ try:
         arr_ret_inc_tax, arr_ret_res_tax = np.zeros(years_count), np.zeros(years_count) 
 
         arr_exp_base = np.zeros(years_count)
+        arr_exp_support = np.zeros(years_count) # ★追加：子どもへの仕送り
+        arr_exp_ideco_savings_ins = np.zeros(years_count) # ★追加：iDeCo・貯蓄型保険等の掛金
         arr_exp_insurance = np.zeros(years_count)
         arr_exp_event = np.zeros(years_count)
         arr_exp_house = np.zeros(years_count)
@@ -1401,6 +1703,7 @@ try:
         arr_edu_loan_pmts = np.zeros(years_count)
         arr_reform_loan_pmts = np.zeros(years_count)
         arr_invest_amount = np.zeros(years_count) 
+        arr_spot_invest = np.zeros(years_count)
 
         arr_debt_housing = np.zeros(years_count)
         arr_debt_car = np.zeros(years_count)
@@ -1411,10 +1714,13 @@ try:
         arr_mortgage_deduction = np.zeros(years_count)
 
         balances_savings = np.zeros(years_count)
+        balances_dry_powder = np.zeros(years_count)
         balances_nisa = np.zeros(years_count)
         balances_taxable = np.zeros(years_count)
         balances_ideco_dc = np.zeros(years_count)
         total_assets = np.zeros(years_count)
+
+
         
         current_rent_annual = rent_annual
         last_rent_update_year = 0
@@ -1437,7 +1743,10 @@ try:
 
         curr_main_nisa = initial_nisa
         curr_main_taxable = initial_taxable
-        curr_main_savings = initial_savings
+        use_dp = has_dry_powder and enable_defense
+        use_gr = has_guardrail and enable_defense
+        curr_main_savings = initial_savings + (initial_dry_powder if (has_dry_powder and not enable_defense) else 0)
+        curr_dry_powder = initial_dry_powder if use_dp else 0
         
         curr_sp_nisa = sp_initial_nisa if has_marriage else 0
         curr_sp_taxable = sp_initial_taxable if has_marriage else 0
@@ -1521,6 +1830,10 @@ try:
                     cost = car_first_purchase_cost if c_age == car_first_purchase_age else car_replace_cost
                     years_passed = age - c_age
                     c_debt += calc_loan_balance(cost, car_loan_rate, car_loan_years, years_passed)
+                    if age == c_age:
+                        pmt = calc_mortgage_pmt(cost, car_loan_rate, car_loan_years)
+                        for j in range(i, min(years_count, i + car_loan_years)):
+                            arr_car_loan_pmts[j] += pmt
                     c_age += car_replace_cycle
                     
             if has_marriage and sp_has_car and sp_car_loan_use:
@@ -1529,6 +1842,10 @@ try:
                     cost = sp_car_first_purchase_cost if sp_c_age == sp_car_first_purchase_age else sp_car_replace_cost
                     years_passed = sp_age - sp_c_age
                     c_debt += calc_loan_balance(cost, sp_car_loan_rate, sp_car_loan_years, years_passed)
+                    if sp_age == sp_c_age:
+                        pmt = calc_mortgage_pmt(cost, sp_car_loan_rate, sp_car_loan_years)
+                        for j in range(i, min(years_count, i + sp_car_loan_years)):
+                            arr_car_loan_pmts[j] += pmt
                     sp_c_age += sp_car_replace_cycle
                     
             if has_reform and age >= reform_age and use_reform_loan:
@@ -2016,10 +2333,11 @@ try:
                             
             exp_car += arr_car_loan_pmts[i]
                         
-            if has_ideco and age < ideco_receipt_age: exp_base += (current_ideco_monthly * 12)
-            if has_marriage and has_sp_ideco and sp_age < sp_ideco_receipt_age: exp_base += (current_sp_ideco_monthly * 12)
-            
-            exp_base += current_life_ins_prem + current_pp_prem
+            # ★iDeCo・個人年金・貯蓄型保険の掛金を「基本生活費」から独立させて集計
+            exp_ideco_savings_ins = 0
+            if has_ideco and age < ideco_receipt_age: exp_ideco_savings_ins += (current_ideco_monthly * 12)
+            if has_marriage and has_sp_ideco and sp_age < sp_ideco_receipt_age: exp_ideco_savings_ins += (current_sp_ideco_monthly * 12)
+            exp_ideco_savings_ins += current_life_ins_prem + current_pp_prem
                 
             if housing_type == "賃貸":
                 if not has_housing or age < housing_purchase_age: 
@@ -2045,7 +2363,9 @@ try:
                     exp_house += reform_cost
                     
             normal_exp_house = exp_house + arr_reform_loan_pmts[i] + h_pmt_this_year
-                    
+            
+            # ★子どもへの仕送り（家賃＋生活費）も「基本生活費・住宅費」から独立させて集計
+            exp_support = 0
             for child in child_settings:
                 c_age = age - child["birth_age"]
                 if c_age >= 4:
@@ -2056,8 +2376,7 @@ try:
                                 exp_edu += edu_cost
                                 
                 if child["uni_support"]["active"] and child["uni_support"]["start"] <= c_age <= child["uni_support"]["end"]:
-                    normal_exp_house += (child["uni_support"]["rent"] * 12)
-                    exp_base += (child["uni_support"]["living"] * 12)
+                    exp_support += (child["uni_support"]["rent"] + child["uni_support"]["living"]) * 12
                                 
             normal_exp_edu = exp_edu + arr_edu_loan_pmts[i]
             normal_exp_car = exp_car
@@ -2067,19 +2386,21 @@ try:
             exp_car = normal_exp_car
 
             arr_exp_base[i] = exp_base
-            arr_exp_insurance[i] = insurance_premium_yearly # 民間保険料を独立記録
+            arr_exp_support[i] = exp_support
+            arr_exp_ideco_savings_ins[i] = exp_ideco_savings_ins
+            arr_exp_insurance[i] = insurance_premium_yearly
             arr_exp_house[i] = exp_house
             arr_exp_edu[i] = exp_edu
             arr_exp_car[i] = exp_car
             arr_exp_nursing[i] = exp_nursing
             
             # --- 🛡️ ガードレール機能（相場暴落時の支出カット） ---
-            if has_guardrail and return_arr[i] <= -guardrail_trigger:
+            if use_gr and return_arr[i] <= -guardrail_trigger:
                 arr_exp_base[i] = arr_exp_base[i] * (1.0 - guardrail_cut)
                 arr_exp_event[i] = arr_exp_event[i] * (1.0 - guardrail_cut)
 
-            # 総支出に保険料（arr_exp_insurance）を追加
-            arr_total_exp[i] = arr_exp_base[i] + arr_exp_insurance[i] + arr_exp_event[i] + arr_exp_house[i] + arr_exp_edu[i] + arr_exp_car[i] + arr_exp_nursing[i]
+            # 総支出の合算
+            arr_total_exp[i] = arr_exp_base[i] + arr_exp_support[i] + arr_exp_ideco_savings_ins[i] + arr_exp_insurance[i] + arr_exp_event[i] + arr_exp_house[i] + arr_exp_edu[i] + arr_exp_car[i] + arr_exp_nursing[i]
             
             applicable_tax_rate = future_tax_rate if age >= tax_change_age else 0.20
             
@@ -2089,6 +2410,10 @@ try:
             calc_nisa = curr_main_nisa * (1 + current_return) + curr_sp_nisa * (1 + current_return)
             calc_taxable = curr_main_taxable * (1 + current_taxable_real_return) + curr_sp_taxable * (1 + current_taxable_real_return)
             calc_savings = curr_main_savings + curr_sp_savings
+            
+            # ★待機資金の平時運用（税引後利回り）
+            dp_real_yield = dp_yield * (1 - applicable_tax_rate)
+            calc_dry_powder = curr_dry_powder * (1 + dp_real_yield) if use_dp else 0
             
             w_taxable = (curr_main_taxable * withdrawal_rate_taxable if age >= withdrawal_start_age else 0) + (curr_sp_taxable * sp_withdrawal_rate_taxable if sp_age >= sp_withdrawal_start_age else 0)
             w_nisa = (curr_main_nisa * withdrawal_rate_nisa if age >= withdrawal_start_age else 0) + (curr_sp_nisa * sp_withdrawal_rate_nisa if sp_age >= sp_withdrawal_start_age else 0)
@@ -2100,6 +2425,8 @@ try:
             arr_annual_balance[i] = annual_balance 
             
             lump_sum_income_this_year = 0
+            main_nisa_annual_rem = 3600000
+            sp_nisa_annual_rem = 3600000
             
             if has_home_sale:
                 if home_sale_trigger == "本人が入居した年" and age == nh_entry_age:
@@ -2126,13 +2453,13 @@ try:
                 if ret_lump_dest == "特定口座へ(運用継続)":
                     calc_taxable += ret_net_main
                 elif ret_lump_dest == "NISA枠優先 (あふれた分は特定口座へ)":
-                    nisa_room_annual = 3600000
                     nisa_room_lifetime = max(0, 18000000 - main_nisa_lifetime_invested)
-                    nisa_add = min(ret_net_main, nisa_room_annual, nisa_room_lifetime)
+                    nisa_add = min(ret_net_main, main_nisa_annual_rem, nisa_room_lifetime)
                     taxable_add = ret_net_main - nisa_add
                     calc_nisa += nisa_add
                     calc_taxable += taxable_add
                     main_nisa_lifetime_invested += nisa_add
+                    main_nisa_annual_rem -= nisa_add
                 else:
                     calc_savings += ret_net_main
                     
@@ -2140,13 +2467,13 @@ try:
                 if sp_ret_lump_dest == "特定口座へ(運用継続)":
                     calc_taxable += ret_net_sp
                 elif sp_ret_lump_dest == "NISA枠優先 (あふれた分は特定口座へ)":
-                    nisa_room_annual = 3600000
                     nisa_room_lifetime = max(0, 18000000 - sp_nisa_lifetime_invested)
-                    nisa_add = min(ret_net_sp, nisa_room_annual, nisa_room_lifetime)
+                    nisa_add = min(ret_net_sp, sp_nisa_annual_rem, nisa_room_lifetime)
                     taxable_add = ret_net_sp - nisa_add
                     calc_nisa += nisa_add
                     calc_taxable += taxable_add
                     sp_nisa_lifetime_invested += nisa_add
+                    sp_nisa_annual_rem -= nisa_add
                 else:
                     calc_savings += ret_net_sp
             
@@ -2154,13 +2481,13 @@ try:
                 if ideco_lump_dest == "特定口座へ(運用継続)":
                     calc_taxable += ideco_lump_net_main
                 elif ideco_lump_dest == "NISA枠優先 (あふれた分は特定口座へ)":
-                    nisa_room_annual = 3600000
                     nisa_room_lifetime = max(0, 18000000 - main_nisa_lifetime_invested)
-                    nisa_add = min(ideco_lump_net_main, nisa_room_annual, nisa_room_lifetime)
+                    nisa_add = min(ideco_lump_net_main, main_nisa_annual_rem, nisa_room_lifetime)
                     taxable_add = ideco_lump_net_main - nisa_add
                     calc_nisa += nisa_add
                     calc_taxable += taxable_add
                     main_nisa_lifetime_invested += nisa_add
+                    main_nisa_annual_rem -= nisa_add
                 else:
                     calc_savings += ideco_lump_net_main
             
@@ -2168,13 +2495,13 @@ try:
                 if sp_ideco_lump_dest == "特定口座へ(運用継続)":
                     calc_taxable += ideco_lump_net_sp
                 elif sp_ideco_lump_dest == "NISA枠優先 (あふれた分は特定口座へ)":
-                    nisa_room_annual = 3600000
                     nisa_room_lifetime = max(0, 18000000 - sp_nisa_lifetime_invested)
-                    nisa_add = min(ideco_lump_net_sp, nisa_room_annual, nisa_room_lifetime)
+                    nisa_add = min(ideco_lump_net_sp, sp_nisa_annual_rem, nisa_room_lifetime)
                     taxable_add = ideco_lump_net_sp - nisa_add
                     calc_nisa += nisa_add
                     calc_taxable += taxable_add
                     sp_nisa_lifetime_invested += nisa_add
+                    sp_nisa_annual_rem -= nisa_add
                 else:
                     calc_savings += ideco_lump_net_sp
                     
@@ -2182,22 +2509,53 @@ try:
             
             arr_lump_sum_income[i] = lump_sum_income_this_year
             calc_savings += annual_balance + w_taxable + w_nisa
-            
             actual_withdrawal_this_year = w_taxable + w_nisa
             
-            current_total_assets = calc_savings + calc_taxable + calc_nisa + curr_ideco_balance + curr_dc_balance + curr_sp_ideco_balance + curr_sp_dc_balance
-            rate_amount = current_total_assets * min_savings_rate
+            # ★総資産と各維持ライン（預貯金最低・預貯金最高・待機資金上限）の算出
+            current_total_assets = max(0, calc_savings + calc_dry_powder + calc_taxable + calc_nisa + curr_ideco_balance + curr_dc_balance + curr_sp_ideco_balance + curr_sp_dc_balance)
             
-            if min_savings_rule == "金額が高い方を採用":
-                target_savings = max(min_savings_amount, rate_amount)
-            elif min_savings_rule == "金額が低い方を採用":
-                target_savings = min(min_savings_amount, rate_amount)
-            elif min_savings_rule == "定率のみを採用":
-                target_savings = rate_amount
+            # 1) 預貯金の最低維持ライン (target_savings)
+            rate_amount = current_total_assets * min_savings_rate
+            if min_savings_rule == "金額が高い方を採用": target_savings = max(min_savings_amount, rate_amount)
+            elif min_savings_rule == "金額が低い方を採用": target_savings = min(min_savings_amount, rate_amount)
+            elif min_savings_rule == "定率のみを採用": target_savings = rate_amount
+            else: target_savings = min_savings_amount
+
+            # 2) 暴落待機資金の目標上限枠 (target_dp_cap)
+            if use_dp:
+                dp_rate_amount = current_total_assets * dp_max_rate
+                if dp_max_rule == "金額が高い方を採用": target_dp_cap = max(dp_max_cap, dp_rate_amount)
+                elif dp_max_rule == "金額が低い方を採用": target_dp_cap = min(dp_max_cap, dp_rate_amount)
+                elif dp_max_rule == "定率のみを採用": target_dp_cap = dp_rate_amount
+                else: target_dp_cap = dp_max_cap
             else:
-                target_savings = min_savings_amount
-                
-            invested_this_year = 0
+                target_dp_cap = 0
+
+            # ★【バグ修正】まず「純粋な収支赤字による預貯金の最低ライン割れ」を補填する（積立や超過投資で減った分を赤字と誤認させないため先に処理）
+            shortfall_to_fill = max(0, target_savings - calc_savings)
+            max_allowed_withdrawal = max(0, prev_savings_balance - calc_savings)
+            shortfall = min(shortfall_to_fill, max_allowed_withdrawal)
+            
+            if shortfall > 0:
+                if deficit_order == "特定口座(世帯) → NISA(世帯) → 預貯金を最低維持ラインまで使う":
+                    order = [(calc_taxable, 'taxable'), (calc_nisa, 'nisa')]
+                elif deficit_order == "NISA(世帯) → 特定口座(世帯) → 預貯金を最低維持ラインまで使う":
+                    order = [(calc_nisa, 'nisa'), (calc_taxable, 'taxable')]
+                else:
+                    order = [(calc_taxable, 'taxable'), (calc_nisa, 'nisa')]
+                    
+                for val, name in order:
+                    if shortfall <= 0: break
+                    take = min(val, shortfall)
+                    if name == 'taxable': calc_taxable -= take
+                    elif name == 'nisa': calc_nisa -= take
+                    calc_savings += take
+                    shortfall -= take
+                    actual_withdrawal_this_year += take
+
+            arr_withdrawal_amount[i] = actual_withdrawal_this_year
+
+            # --- 積立・暴落待機資金・最高維持ライン超過スイープ処理 ---
             if has_investment and age <= invest_end_age:
                 invest_available_main = invest_monthly * 12
             else:
@@ -2209,7 +2567,18 @@ try:
                 invest_available_sp = 0
                 
             total_invest_target = invest_available_main + invest_available_sp
-            
+            is_crash_year = use_dp and (current_return <= -dp_step_drop)
+
+            # ★平時かつ「待機資金のプールを最優先」の場合、通常積立の前に最低維持ライン超えの余剰分から待機資金を上限枠(target_dp_cap)まで満たす
+            if use_dp and not is_crash_year and "待機資金のプールを最優先" in dp_refill_priority:
+                if calc_dry_powder < target_dp_cap:
+                    surplus_for_dp = max(0, calc_savings - target_savings)
+                    needed_dp = target_dp_cap - calc_dry_powder
+                    refill_amount = min(surplus_for_dp, needed_dp)
+                    calc_savings -= refill_amount
+                    calc_dry_powder += refill_amount
+
+            # 通常の毎月積立投資（最低維持ライン target_savings を割らない範囲で実行）
             invest_available_from_savings = max(0, calc_savings - target_savings)
             actual_invest = min(total_invest_target, invest_available_from_savings)
             
@@ -2220,68 +2589,125 @@ try:
                 
                 if actual_main_invest > 0:
                     if invest_strategy == "NISA優先 (年間360万/生涯1800万上限、超過分は特定口座)":
-                        nisa_room_annual = 3600000
                         nisa_room_lifetime = max(0, 18000000 - main_nisa_lifetime_invested)
-                        nisa_add = min(actual_main_invest, nisa_room_annual, nisa_room_lifetime)
+                        nisa_add = min(actual_main_invest, main_nisa_annual_rem, nisa_room_lifetime)
                         taxable_add = actual_main_invest - nisa_add
                         calc_nisa += nisa_add
                         calc_taxable += taxable_add
                         main_nisa_lifetime_invested += nisa_add
+                        main_nisa_annual_rem -= nisa_add
                     else:
                         calc_taxable += actual_main_invest
                         
                 if actual_sp_invest > 0:
                     if sp_invest_strategy == "NISA優先":
-                        nisa_room_annual = 3600000
                         nisa_room_lifetime = max(0, 18000000 - sp_nisa_lifetime_invested)
-                        nisa_add = min(actual_sp_invest, nisa_room_annual, nisa_room_lifetime)
+                        nisa_add = min(actual_sp_invest, sp_nisa_annual_rem, nisa_room_lifetime)
                         taxable_add = actual_sp_invest - nisa_add
                         calc_nisa += nisa_add
                         calc_taxable += taxable_add
                         sp_nisa_lifetime_invested += nisa_add
+                        sp_nisa_annual_rem -= nisa_add
                     else:
                         calc_taxable += actual_sp_invest
 
                 calc_savings -= actual_invest
             arr_invest_amount[i] = actual_invest
 
-            shortfall_to_fill = max(0, target_savings - calc_savings)
-            max_allowed_withdrawal = max(0, prev_savings_balance - calc_savings)
-            
-            shortfall = min(shortfall_to_fill, max_allowed_withdrawal)
-            
-            if shortfall > 0:
-                if deficit_order == "特定口座(世帯) → NISA(世帯) → 預貯金を最低維持ラインまで使う":
-                    order = [(calc_taxable, 'taxable'), (calc_nisa, 'nisa')]
-                elif deficit_order == "NISA(世帯) → 特定口座(世帯) → 預貯金を最低維持ラインまで使う":
-                    order = [(calc_nisa, 'nisa'), (calc_taxable, 'taxable')]
-                elif deficit_order == "預貯金を最低維持ラインまで使う → 特定口座(世帯) → NISA(世帯)":
-                    order = [(calc_taxable, 'taxable'), (calc_nisa, 'nisa')]
-                else:
-                    order = [(calc_taxable, 'taxable'), (calc_nisa, 'nisa')]
+            # --- ★暴落時スポット投資 ＆ 平時の待機資金調整（補充・上限超過スイープ） ---
+            spot_invest_this_year = 0
+            if use_dp:
+                if is_crash_year and calc_dry_powder > 0:
+                    drop_abs = abs(current_return)
+                    if drop_abs >= dp_full_drop:
+                        deploy_ratio = 1.0
+                    else:
+                        steps_reached = int(drop_abs // dp_step_drop)
+                        if dp_calc_mode == "累積・残高基準（通過ステップごとにその時の残高の〇%を順次投入）":
+                            rem_ratio = 1.0
+                            for s in range(1, steps_reached + 1):
+                                stage_r = min(1.0, s * dp_step_rate)
+                                rem_ratio *= (1.0 - stage_r)
+                            deploy_ratio = 1.0 - rem_ratio
+                        elif dp_calc_mode == "累積・当初枠基準（通過ステップの投入率を単純合算して投入）":
+                            deploy_ratio = min(1.0, sum(s * dp_step_rate for s in range(1, steps_reached + 1)))
+                        else:
+                            deploy_ratio = min(1.0, steps_reached * dp_step_rate)
+                            
+                    spot_invest_this_year = calc_dry_powder * deploy_ratio
+                    calc_dry_powder -= spot_invest_this_year
                     
-                for val, name in order:
-                    if shortfall <= 0: break
-                    take = min(val, shortfall)
-                    if name == 'taxable': 
-                        calc_taxable -= take
-                    elif name == 'nisa': 
-                        calc_nisa -= take
-                    calc_savings += take
-                    shortfall -= take
-                    actual_withdrawal_this_year += take
+                    nisa_room_lifetime = max(0, 18000000 - main_nisa_lifetime_invested)
+                    nisa_add = min(spot_invest_this_year, main_nisa_annual_rem, nisa_room_lifetime)
+                    taxable_add = spot_invest_this_year - nisa_add
+                    calc_nisa += nisa_add
+                    calc_taxable += taxable_add
+                    main_nisa_lifetime_invested += nisa_add
+                    main_nisa_annual_rem -= nisa_add
+                elif not is_crash_year:
+                    if calc_dry_powder < target_dp_cap:
+                        # 上限枠に空きがある場合、最低維持ラインを超える余剰預貯金があれば補充
+                        surplus_savings = max(0, calc_savings - target_savings)
+                        needed_dp = target_dp_cap - calc_dry_powder
+                        refill_amount = min(surplus_savings, needed_dp)
+                        calc_savings -= refill_amount
+                        calc_dry_powder += refill_amount
+                    elif calc_dry_powder > target_dp_cap:
+                        # ★【バグ修正】利回りや総資産変動で待機資金が上限枠(target_dp_cap)を超えている場合、超過分を投資(NISA優先→特定口座)へスイープして上限以下に揃える
+                        excess_dp = calc_dry_powder - target_dp_cap
+                        calc_dry_powder -= excess_dp
+                        nisa_room_lifetime = max(0, 18000000 - main_nisa_lifetime_invested)
+                        nisa_add = min(excess_dp, main_nisa_annual_rem, nisa_room_lifetime)
+                        taxable_add = excess_dp - nisa_add
+                        calc_nisa += nisa_add
+                        calc_taxable += taxable_add
+                        main_nisa_lifetime_invested += nisa_add
+                        main_nisa_annual_rem -= nisa_add
+                        arr_invest_amount[i] += excess_dp
+                        
+            arr_spot_invest[i] = spot_invest_this_year
 
-            arr_withdrawal_amount[i] = actual_withdrawal_this_year
+            # --- ★預貯金の最高維持ライン超過分の自動投資（NISA優先→特定口座スイープ）ロジック ---
+            if has_max_savings_cap:
+                max_rate_amount = current_total_assets * max_savings_rate
+                if max_savings_rule == "金額が高い方を採用":
+                    raw_max_target = max(max_savings_amount, max_rate_amount)
+                elif max_savings_rule == "金額が低い方を採用":
+                    raw_max_target = min(max_savings_amount, max_rate_amount)
+                elif max_savings_rule == "定率のみを採用":
+                    raw_max_target = max_rate_amount
+                else:
+                    raw_max_target = max_savings_amount
+                
+                # 最低維持ライン(target_savings)を下回らないよう安全補正
+                effective_max_savings = max(target_savings, raw_max_target)
+                
+                if calc_savings > effective_max_savings:
+                    excess_savings = calc_savings - effective_max_savings
+                    calc_savings -= excess_savings
+                    
+                    # NISA枠優先（年間360万/生涯1800万の残り枠）→ 超過分は特定口座へ自動積立
+                    nisa_room_lifetime = max(0, 18000000 - main_nisa_lifetime_invested)
+                    nisa_add = min(excess_savings, main_nisa_annual_rem, nisa_room_lifetime)
+                    taxable_add = excess_savings - nisa_add
+                    calc_nisa += nisa_add
+                    calc_taxable += taxable_add
+                    main_nisa_lifetime_invested += nisa_add
+                    main_nisa_annual_rem -= nisa_add
+                        
+                    arr_invest_amount[i] += excess_savings
 
             balances_nisa[i] = max(0, calc_nisa)
             balances_taxable[i] = max(0, calc_taxable)
             balances_savings[i] = calc_savings
+            balances_dry_powder[i] = max(0, calc_dry_powder)
             balances_ideco_dc[i] = max(0, curr_ideco_balance + curr_dc_balance + curr_sp_ideco_balance + curr_sp_dc_balance)
-            total_assets[i] = balances_savings[i] + balances_nisa[i] + balances_taxable[i] + balances_ideco_dc[i]
+            total_assets[i] = balances_savings[i] + balances_dry_powder[i] + balances_nisa[i] + balances_taxable[i] + balances_ideco_dc[i]
             
             curr_main_nisa = balances_nisa[i]
             curr_main_taxable = balances_taxable[i]
             curr_main_savings = balances_savings[i]
+            curr_dry_powder = balances_dry_powder[i]
             curr_sp_nisa = 0
             curr_sp_taxable = 0
             curr_sp_savings = 0
@@ -2310,6 +2736,8 @@ try:
             "arr_ret_inc_tax": arr_ret_inc_tax,
             "arr_ret_res_tax": arr_ret_res_tax,
             "arr_exp_base": arr_exp_base,
+            "arr_exp_support": arr_exp_support,
+            "arr_exp_ideco_savings_ins": arr_exp_ideco_savings_ins,
             "arr_exp_insurance": arr_exp_insurance,
             "arr_exp_event": arr_exp_event,
             "arr_exp_house": arr_exp_house,
@@ -2323,6 +2751,7 @@ try:
             "arr_edu_loan_pmts": arr_edu_loan_pmts,
             "arr_reform_loan_pmts": arr_reform_loan_pmts,
             "arr_invest_amount": arr_invest_amount,
+            "arr_spot_invest": arr_spot_invest,
             "arr_debt_housing": arr_debt_housing,
             "arr_debt_car": arr_debt_car,
             "arr_debt_reform": arr_debt_reform,
@@ -2330,12 +2759,14 @@ try:
             "arr_debt_balance": arr_debt_balance,
             "arr_mortgage_deduction": arr_mortgage_deduction,
             "balances_savings": balances_savings,
+            "balances_dry_powder": balances_dry_powder,
             "balances_nisa": balances_nisa,
             "balances_taxable": balances_taxable,
             "balances_ideco_dc": balances_ideco_dc,
             "total_assets": total_assets,
             "depletion_age": depletion_age,
-            "arr_ret_tax_details": ret_tax_details 
+            "arr_ret_tax_details": ret_tax_details,
+            "arr_return_rate": return_arr
         }
 
     def generate_return_array(expected_ret, risk, mode="fixed"):
@@ -2357,33 +2788,110 @@ try:
 
     if sim_mode == "定率シミュレーション（基本）":
         ret_arr = generate_return_array(expected_return, 0.0, "fixed")
-        res = run_simulation(ret_arr)
+        res_base = run_simulation(ret_arr, enable_defense=True)
+        res = res_base
         
-        depletion_age = res["depletion_age"]
+        depletion_age = res_base["depletion_age"]
         depletion_age_p10 = None
+        percentile_10_no_def = None
+        mc_avg_spot_count = 0.0
+        mc_avg_spot_total = 0.0
         
     else:
         ret_arr_base = generate_return_array(expected_return, risk_std, "fixed")
-        res = run_simulation(ret_arr_base)
-        depletion_age = res["depletion_age"]
+        res_base = run_simulation(ret_arr_base, enable_defense=True)
+        depletion_age = res_base["depletion_age"]
         
-        NUM_SIMULATIONS = 300
-        mc_net_assets = []
+        # 現在の入力状態のハッシュを作成し、同じ条件なら再計算をスキップして爆速化する
+        state_hash = json.dumps(current_state, sort_keys=True, default=str)
+        need_recalc = True
         
-        with st.spinner("モンテカルロ・シミュレーションを計算中..."):
-            for _ in range(NUM_SIMULATIONS):
-                ret_arr = generate_return_array(expected_return, risk_std, "montecarlo")
-                sim_res = run_simulation(ret_arr)
-                net_assets = sim_res["total_assets"] - sim_res["arr_debt_balance"]
-                mc_net_assets.append(net_assets)
-                
-        mc_net_assets = np.array(mc_net_assets)
-        percentile_90 = np.percentile(mc_net_assets, 90, axis=0)
-        percentile_50 = np.percentile(mc_net_assets, 50, axis=0)
-        percentile_10 = np.percentile(mc_net_assets, 10, axis=0)
-        
-        depletion_age_p10 = next((ages[i] for i, total in enumerate(percentile_10) if total <= 0), None)
+        if mc_pause_auto and 'mc_cached_data' in st.session_state:
+            st.info("⚡ **連続入力モード中：** 入力変更による自動モンテカルロ計算を一時停止しています。すべての数値の入力が終わったら下のボタンを押してください。")
+            if st.button("🔄 最新の入力内容でモンテカルロ・シミュレーションを実行する", type="primary", use_container_width=True):
+                need_recalc = True
+            else:
+                need_recalc = False
+        elif 'mc_cached_data' in st.session_state and st.session_state.get('mc_cached_hash') == state_hash:
+            need_recalc = False
 
+        if need_recalc:
+            NUM_SIMULATIONS = 300
+            mc_net_assets = []
+            mc_sim_results = []
+            mc_net_assets_no_def = []
+            mc_spot_counts = []
+            mc_spot_totals = []
+            
+            defense_active = has_dry_powder or has_guardrail
+            # 乱数シードを固定することで、入力値を変えたときの純粋な差が比較できるようにする
+            np.random.seed(42)
+            
+            with st.spinner("モンテカルロ・シミュレーションを計算中..."):
+                for _ in range(NUM_SIMULATIONS):
+                    ret_arr = generate_return_array(expected_return, risk_std, "montecarlo")
+                    sim_res = run_simulation(ret_arr, enable_defense=True)
+                    net_assets = sim_res["total_assets"] - sim_res["arr_debt_balance"]
+                    mc_net_assets.append(net_assets)
+                    mc_sim_results.append(sim_res)
+                    
+                    mc_spot_counts.append(int(np.sum(sim_res["arr_spot_invest"] > 0)))
+                    mc_spot_totals.append(float(np.sum(sim_res["arr_spot_invest"])))
+                    
+                    if defense_active:
+                        sim_res_no_def = run_simulation(ret_arr, enable_defense=False)
+                        net_assets_no_def = sim_res_no_def["total_assets"] - sim_res_no_def["arr_debt_balance"]
+                        mc_net_assets_no_def.append(net_assets_no_def)
+                    
+            mc_net_assets = np.array(mc_net_assets)
+            percentile_90 = np.percentile(mc_net_assets, 90, axis=0)
+            percentile_50 = np.percentile(mc_net_assets, 50, axis=0)
+            percentile_10 = np.percentile(mc_net_assets, 10, axis=0)
+            
+            depletion_age_p10 = next((ages[i] for i, total in enumerate(percentile_10) if total <= 0), None)
+            
+            if defense_active and len(mc_net_assets_no_def) > 0:
+                mc_net_assets_no_def = np.array(mc_net_assets_no_def)
+                percentile_10_no_def = np.percentile(mc_net_assets_no_def, 10, axis=0)
+                depletion_age_p10_no_def = next((ages[i] for i, total in enumerate(percentile_10_no_def) if total <= 0), None)
+            else:
+                percentile_10_no_def = None
+                depletion_age_p10_no_def = None
+                
+            mc_avg_spot_count = float(np.mean(mc_spot_counts))
+            mc_avg_spot_total = float(np.mean(mc_spot_totals))
+            
+            check_idx = ages.index(85) if 85 in ages else -1
+            idx_p10 = int(np.argmin(np.abs(mc_net_assets[:, check_idx] - percentile_10[check_idx])))
+            idx_p50 = int(np.argmin(np.abs(mc_net_assets[:, check_idx] - percentile_50[check_idx])))
+            idx_p90 = int(np.argmin(np.abs(mc_net_assets[:, check_idx] - percentile_90[check_idx])))
+            
+            res_p10_rep = mc_sim_results[idx_p10]
+            res_p50_rep = mc_sim_results[idx_p50]
+            res_p90_rep = mc_sim_results[idx_p90]
+            
+            st.session_state['mc_cached_hash'] = state_hash
+            st.session_state['mc_cached_data'] = {
+                "percentile_90": percentile_90, "percentile_50": percentile_50, "percentile_10": percentile_10,
+                "depletion_age_p10": depletion_age_p10, "percentile_10_no_def": percentile_10_no_def,
+                "depletion_age_p10_no_def": depletion_age_p10_no_def, "mc_avg_spot_count": mc_avg_spot_count,
+                "mc_avg_spot_total": mc_avg_spot_total, "res_p10_rep": res_p10_rep, "res_p50_rep": res_p50_rep, "res_p90_rep": res_p90_rep
+            }
+        else:
+            cached = st.session_state['mc_cached_data']
+            percentile_90 = cached["percentile_90"]
+            percentile_50 = cached["percentile_50"]
+            percentile_10 = cached["percentile_10"]
+            depletion_age_p10 = cached["depletion_age_p10"]
+            percentile_10_no_def = cached["percentile_10_no_def"]
+            depletion_age_p10_no_def = cached["depletion_age_p10_no_def"]
+            mc_avg_spot_count = cached["mc_avg_spot_count"]
+            mc_avg_spot_total = cached["mc_avg_spot_total"]
+            res_p10_rep = cached["res_p10_rep"]
+            res_p50_rep = cached["res_p50_rep"]
+            res_p90_rep = cached["res_p90_rep"]
+            
+        res = res_base
     ret_idx = ages.index(retirement_age) if retirement_age in ages else 0
     req_cash = 0
     req_invested = 0
@@ -2403,7 +2911,7 @@ try:
         if has_car and age == car_dispose_age: sale_income += car_sale_price
         if has_marriage and sp_has_car and sp_age == sp_car_dispose_age: sale_income += sp_car_sale_price
         
-        shortfall = res["arr_total_exp"][i] - res["arr_net_income"][i] - sale_income
+        shortfall = res_base["arr_total_exp"][i] - res_base["arr_net_income"][i] - sale_income
         req_cash += shortfall
         
         applicable_tax_rate = future_tax_rate if age >= tax_change_age else 0.20
@@ -2416,73 +2924,130 @@ try:
 
     # --- UI Outputs ---
     st.markdown("---")
+    st.markdown("### 📊 シミュレーション結果サマリー")
     
-    if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
-        st.markdown("### 🎲 モンテカルロ・シミュレーション結果（ストレステスト）")
-        st.write("設定されたリスク（標準偏差）に基づいて300通りの人生をシミュレーションし、「楽観・標準・悲観」の3つのシナリオを抽出しました。**下位10%の悲観シナリオは、暴落相場や長期低迷に直面した場合のストレステスト**として機能します。")
-        
-        col_mc1, col_mc2 = st.columns(2)
-        with col_mc1:
-            color_class = "red" if depletion_age else ""
-            st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.95rem;">資産の枯渇年齢 (標準シナリオ/中央値)</div><div class="metric-value {color_class}">{depletion_age if depletion_age else "枯渇なし"}歳</div></div>', unsafe_allow_html=True)
-        with col_mc2:
-            color_class_p10 = "red" if depletion_age_p10 else ""
-            st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.95rem;">資産の枯渇年齢 (悲観シナリオ/暴落想定)</div><div class="metric-value {color_class_p10}">{depletion_age_p10 if depletion_age_p10 else "枯渇なし"}歳</div></div>', unsafe_allow_html=True)
-            
-        fig_mc = plot_monte_carlo(ages, percentile_90, percentile_50, percentile_10)
-        st.plotly_chart(fig_mc, use_container_width=True, config={'displayModeBar': False})
-        st.markdown("---")
-
     col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        color_class = "red" if depletion_age else ""
-        title_text = "資産の枯渇年齢" if sim_mode == "定率シミュレーション（基本）" else "資産の枯渇年齢 (標準シナリオ)"
-        st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.95rem;">{title_text}</div><div class="metric-value {color_class}">{depletion_age if depletion_age else "枯渇なし"}歳</div></div>', unsafe_allow_html=True)
-    with col2:
-        val_85 = res["total_assets"][ages.index(85) if 85 in ages else -1] - res["arr_debt_balance"][ages.index(85) if 85 in ages else -1]
-        st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.95rem;">85歳時点の純資産</div><div class="metric-value">{val_85/10000:,.1f}万円</div></div>', unsafe_allow_html=True)
-    with col3:
-        color_class_req1 = "red" if req_cash > 0 else ""
-        st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.95rem;">退職時の必要額(貯金のみ)</div><div class="metric-value {color_class_req1}">{req_cash/10000:,.1f}万円</div></div>', unsafe_allow_html=True)
-    with col4:
-        color_class_req2 = "red" if req_invested > 0 else ""
-        st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.95rem;">退職時の必要額(運用取崩)</div><div class="metric-value {color_class_req2}">{req_invested/10000:,.1f}万円</div></div>', unsafe_allow_html=True)
+    if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
+        with col1:
+            color_class = "red" if depletion_age else ""
+            st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.9rem;">資産の枯渇年齢 (標準/中央値)</div><div class="metric-value {color_class}">{depletion_age if depletion_age else "枯渇なし"}歳</div></div>', unsafe_allow_html=True)
+        with col2:
+            color_class_p10 = "red" if depletion_age_p10 else ""
+            st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.9rem;">資産の枯渇年齢 (悲観/下位10%)</div><div class="metric-value {color_class_p10}">{depletion_age_p10 if depletion_age_p10 else "枯渇なし"}歳</div></div>', unsafe_allow_html=True)
+        with col3:
+            check_idx = ages.index(85) if 85 in ages else -1
+            val_85_p50 = percentile_50[check_idx]
+            val_85_p10 = percentile_10[check_idx]
+            st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.9rem;">85歳純資産 (中央値 / 悲観)</div><div class="metric-value" style="font-size:1.35rem;">{format_man_oku_val(val_85_p50/10000)}<br><span style="font-size:0.95rem;color:#dc3545;">(悲観: {format_man_oku_val(val_85_p10/10000)})</span></div></div>', unsafe_allow_html=True)
+        with col4:
+            color_class_req2 = "red" if req_invested > 0 else ""
+            st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.9rem;">退職時の必要額 (運用 / 貯金のみ)</div><div class="metric-value {color_class_req2}" style="font-size:1.35rem;">{format_man_oku_val(req_invested/10000)}<br><span style="font-size:0.95rem;color:#495057;">(貯金: {format_man_oku_val(req_cash/10000)})</span></div></div>', unsafe_allow_html=True)
+    else:
+        with col1:
+            color_class = "red" if depletion_age else ""
+            st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.95rem;">資産の枯渇年齢</div><div class="metric-value {color_class}">{depletion_age if depletion_age else "枯渇なし"}歳</div></div>', unsafe_allow_html=True)
+        with col2:
+            val_85 = res_base["total_assets"][ages.index(85) if 85 in ages else -1] - res_base["arr_debt_balance"][ages.index(85) if 85 in ages else -1]
+            st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.95rem;">85歳時点の純資産</div><div class="metric-value">{format_man_oku_val(val_85/10000)}</div></div>', unsafe_allow_html=True)
+        with col3:
+            color_class_req1 = "red" if req_cash > 0 else ""
+            st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.95rem;">退職時の必要額(貯金のみ)</div><div class="metric-value {color_class_req1}">{format_man_oku_val(req_cash/10000)}</div></div>', unsafe_allow_html=True)
+        with col4:
+            color_class_req2 = "red" if req_invested > 0 else ""
+            st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.95rem;">退職時の必要額(運用取崩)</div><div class="metric-value {color_class_req2}">{format_man_oku_val(req_invested/10000)}</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    with st.expander("📝 教育費の平均コスト目安表 (年額/万円) を見る"):
-        st.table(pd.DataFrame([
-            {"段階": "幼稚園", "公立": EDU_COST["幼稚園(公立)"], "私立": EDU_COST["幼稚園(私立)"]},
-            {"段階": "小学校", "公立": EDU_COST["小学校(公立)"], "私立": EDU_COST["小学校(私立)"]},
-            {"段階": "中学校", "公立": EDU_COST["中学校(公立)"], "私立": EDU_COST["中学校(私立)"]},
-            {"段階": "高校", "公立": EDU_COST["高校(公立)"], "私立": EDU_COST["高校(私立)"]},
-            {"段階": "進学先", "国公立大学": EDU_COST["国公立大学(4年)"], "私立": f'文系:{EDU_COST["私立大学文系(4年)"]} / 理系:{EDU_COST["私立大学理系(4年)"]} / 短大・専門:{EDU_COST["短大(2年)"]}'}
-        ]).set_index("段階"))
-
     if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
-        st.markdown("### 📊 詳細キャッシュフロー分析 (標準シナリオベース)")
+        st.markdown("### 🎲 モンテカルロ・シミュレーション推移（300回試行・ストレステスト）")
+        st.caption("※下位10%の悲観シナリオは、暴落相場や長期低迷に直面した場合のストレステストとして機能します。")
+        
+        if has_dry_powder or has_guardrail:
+            mc_view_opts = [
+                "🌐 通常全体表示（楽観〜悲観）",
+                "📐 対数圧縮スケール（下位の線も広げて見やすくする）",
+                "📊 暴落対策効果（対策あり − 対策なしの差額クローズアップ）"
+            ]
+            mc_view_map = {
+                mc_view_opts[0]: "all",
+                mc_view_opts[1]: "symlog",
+                mc_view_opts[2]: "diff"
+            }
+        else:
+            mc_view_opts = [
+                "🌐 通常全体表示（楽観〜悲観）",
+                "📐 対数圧縮スケール（下位の線も広げて見やすくする）"
+            ]
+            mc_view_map = {
+                mc_view_opts[0]: "all",
+                mc_view_opts[1]: "symlog"
+            }
+            
+        mc_view_sel = st.radio("グラフの表示スケール切り替え：", mc_view_opts, index=0, horizontal=True)
+        mc_view_key = mc_view_map.get(mc_view_sel, "all")
+
+        fig_mc = plot_monte_carlo(ages, percentile_90, percentile_50, percentile_10, percentile_10_no_def, view_mode=mc_view_key)
+        st.plotly_chart(fig_mc, use_container_width=True, config={'displayModeBar': False})
+        st.markdown("---")
+
+    # ★改善案1：下の棒グラフとキャッシュフロー表で表示するシナリオの切り替えUI
+    if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
+        st.markdown("### 📊 詳細キャッシュフロー分析（シナリオ別・内訳検証）")
+        detail_scenario_opts = [
+            "📉 悲観シナリオ（下位10%代表 / 暴落・低迷時のリアルな内訳と待機資金の動きを確認）",
+            "🎲 モンテカルロ中央値シナリオ（50%代表 / 相場の波がある標準的な内訳）",
+            "📈 楽観シナリオ（上位10%代表 / 好調相場の内訳）",
+            "📏 定率（無風）シナリオ（毎年固定リターンで推移した場合の内訳）"
+        ]
+        selected_detail_scenario = st.radio(
+            "下の棒グラフ・キャッシュフロー表に表示するシナリオを選択してください：",
+            detail_scenario_opts,
+            index=0,
+            help="「悲観シナリオ」を選ぶと、実際に暴落が起きた年に待機資金（水色のバー）からスポット投資（★マーク）が発動し、その後の相場回復で資産がどう推移したかを棒グラフと表で詳しく確認できます。"
+        )
+        if selected_detail_scenario == detail_scenario_opts[0]:
+            res = res_p10_rep
+        elif selected_detail_scenario == detail_scenario_opts[1]:
+            res = res_p50_rep
+        elif selected_detail_scenario == detail_scenario_opts[2]:
+            res = res_p90_rep
+        else:
+            res = res_base
+            
+        spot_count_this = int(np.sum(res["arr_spot_invest"] > 0))
+        spot_total_this = float(np.sum(res["arr_spot_invest"])) / 10000
+        if has_dry_powder and spot_count_this > 0:
+            spot_ages_list = [f"{ages[idx]}歳({res['arr_spot_invest'][idx]/10000:.0f}万)" for idx in range(years_count) if res["arr_spot_invest"][idx] > 0]
+            st.caption(f"🎯 **選択中のシナリオでのスポット投資発動履歴（計{spot_count_this}回 / 合計{spot_total_this:,.1f}万円投入）：** " + "、 ".join(spot_ages_list))
     else:
         st.markdown("### 📈 資産推移と年間収支 (単位：万円)")
+        res = res_base
         
-    fig1 = plot_asset_transition(ages, res["balances_savings"], res["balances_nisa"], res["balances_taxable"], res["balances_ideco_dc"], res["arr_debt_housing"], res["arr_debt_car"], res["arr_debt_reform"], res["arr_debt_edu"], res["arr_annual_balance"])
+    fig1 = plot_asset_transition(ages, res["balances_savings"], res["balances_dry_powder"], res["balances_nisa"], res["balances_taxable"], res["balances_ideco_dc"], res["arr_debt_housing"], res["arr_debt_car"], res["arr_debt_reform"], res["arr_debt_edu"], res["arr_annual_balance"], res["arr_spot_invest"])
     st.plotly_chart(fig1, use_container_width=True, config={'displayModeBar': False})
     st.caption("※折れ線グラフ（経常収支）は、あえて「取り崩し分を含まない純粋な生活費の赤字」を表示しています。これを取り崩し込みにしてしまうと、資産が枯渇するまでグラフが「0（トントン）」に張り付いてしまい、本当の家計の赤字幅が見えなくなってしまうためです。")
 
     st.markdown("### 💰 年間収支の内訳比較（額面ベース / 単位：万円）")
     st.caption("※赤字になった年は「資産取崩・赤字補填」のピンクの棒グラフで生活費が補填されている様子が確認できます。")
-    fig2 = plot_cashflow_breakdown(ages, years_count, res["arr_salary"], res["arr_sp_salary"], res["arr_pension"], res["arr_child_allowance"], res["arr_leave_benefit"], res["arr_ret_income"], res["arr_sp_pension"], res["arr_withdrawal_amount"], res["arr_exp_base"], res["arr_exp_insurance"], res["arr_exp_event"], res["arr_exp_house"], res["arr_exp_edu"], res["arr_exp_car"], res["arr_exp_nursing"], res["arr_soc_ins"], res["arr_sp_soc_ins"], res["arr_inc_tax"], res["arr_sp_inc_tax"], res["arr_res_tax"], res["arr_sp_res_tax"], res["arr_ret_inc_tax"], res["arr_ret_res_tax"], res["arr_lump_sum_income"])
+    fig2 = plot_cashflow_breakdown(ages, years_count, res["arr_salary"], res["arr_sp_salary"], res["arr_pension"], res["arr_child_allowance"], res["arr_leave_benefit"], res["arr_ret_income"], res["arr_sp_pension"], res["arr_withdrawal_amount"], res["arr_exp_base"], res["arr_exp_support"], res["arr_exp_ideco_savings_ins"], res["arr_exp_insurance"], res["arr_exp_event"], res["arr_exp_house"], res["arr_exp_edu"], res["arr_exp_car"], res["arr_exp_nursing"], res["arr_soc_ins"], res["arr_sp_soc_ins"], res["arr_inc_tax"], res["arr_sp_inc_tax"], res["arr_res_tax"], res["arr_sp_res_tax"], res["arr_ret_inc_tax"], res["arr_ret_res_tax"], res["arr_lump_sum_income"])
     st.plotly_chart(fig2, use_container_width=True, config={'displayModeBar': False})
 
     st.markdown("### 📋 世帯キャッシュフロー表 (単位: 万円)")
+    show_all_cf_cols = st.checkbox("0円の項目（未設定のローンや手当など）もすべて表に表示する", value=False)
+
     df = pd.DataFrame({
         '本人年齢': ages,
+        '相場リターン(%)': res["arr_return_rate"] * 100,
         '世帯手取り収入(経常)': res["arr_net_income"] / 10000,
         '一時収入(退職金・家等)': res["arr_lump_sum_income"] / 10000,
         '育休給付金': res["arr_leave_benefit"] / 10000,
         '児童手当': res["arr_child_allowance"] / 10000,
         '資産取崩(補填含む)': res["arr_withdrawal_amount"] / 10000,
         '積立投資額': res["arr_invest_amount"] / 10000,
+        '暴落スポット投資': res["arr_spot_invest"] / 10000,
         '基本生活費': res["arr_exp_base"] / 10000,
+        '子ども仕送り': res["arr_exp_support"] / 10000,
+        'iDeCo・貯蓄保険掛金': res["arr_exp_ideco_savings_ins"] / 10000,
         '民間保険料': res["arr_exp_insurance"] / 10000,
         '特別支出(イベント)': res["arr_exp_event"] / 10000,
         '住宅費': res["arr_exp_house"] / 10000,
@@ -2501,6 +3066,7 @@ try:
         '教育ローン残高': res["arr_debt_edu"] / 10000,
         '負債合計': res["arr_debt_balance"] / 10000,
         '預貯金': res["balances_savings"] / 10000,
+        '暴落待機資金': res["balances_dry_powder"] / 10000,
         '特定口座': res["balances_taxable"] / 10000,
         'NISA': res["balances_nisa"] / 10000,
         '世帯iDeCo/DC': res["balances_ideco_dc"] / 10000,
@@ -2508,21 +3074,29 @@ try:
         '純資産額': (res["total_assets"] - res["arr_debt_balance"]) / 10000
     }).set_index('本人年齢')
 
+    # 主要な基本列は常に残し、その他の列は全期間0円なら非表示にして横スクロールを減らす
+    always_keep_cols = {'相場リターン(%)', '世帯手取り収入(経常)', '積立投資額', '基本生活費', '世帯年間収支(取崩前)', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額'}
+    if not show_all_cf_cols:
+        cols_to_keep = [c for c in df.columns if (c in always_keep_cols) or (df[c].abs().max() >= 0.5)]
+        df_display = df[cols_to_keep]
+    else:
+        df_display = df
+
+    red_subset = [c for c in ['相場リターン(%)', '世帯年間収支(取崩前)', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額'] if c in df_display.columns]
+    # 相場リターン(%)だけ小数第1位、他の金額列は整数（カンマ区切り）でスッキリ表示
+    fmt_dict = {c: ("{:.1f}" if c == '相場リターン(%)' else "{:,.0f}") for c in df_display.columns}
     style_func = lambda x: 'color: red' if isinstance(x, (int, float)) and x < 0 else ''
     try:
-        st.dataframe(df.style.format("{:.1f}").map(style_func, subset=['世帯年間収支(取崩前)', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額']), height=400, use_container_width=True)
+        st.dataframe(df_display.style.format(fmt_dict).map(style_func, subset=red_subset), height=400, use_container_width=True)
     except AttributeError:
-        st.dataframe(df.style.format("{:.1f}").applymap(style_func, subset=['世帯年間収支(取崩前)', '預貯金', '特定口座', 'NISA', '世帯総資産', '純資産額']), height=400, use_container_width=True)
+        st.dataframe(df_display.style.format(fmt_dict).applymap(style_func, subset=red_subset), height=400, use_container_width=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("### 📄 退職金・iDeCo 課税計算の詳細レポート")
-    st.caption("※適用されている退職所得控除の年数ルールや、税額の計算プロセスを確認できます。")
-    
     if res.get("arr_ret_tax_details"):
-        df_ret_tax = pd.DataFrame(res["arr_ret_tax_details"])
-        st.dataframe(df_ret_tax, use_container_width=True, hide_index=True)
-    else:
-        st.info("シミュレーション期間中に一時金として受け取る退職金やiDeCoの設定はありません。")
+        st.markdown("<br>", unsafe_allow_html=True)
+        with st.expander("📄 退職金・iDeCo 課税計算の詳細レポートを見る", expanded=True):
+            st.caption("※適用されている退職所得控除の年数ルール（19年ルール・5年ルール）や、税額の計算プロセスを確認できます。")
+            df_ret_tax = pd.DataFrame(res["arr_ret_tax_details"])
+            st.dataframe(df_ret_tax, use_container_width=True, hide_index=True)
 
     # --- アフィリエイト・ネクストアクション エリア ---
     st.markdown("---")
