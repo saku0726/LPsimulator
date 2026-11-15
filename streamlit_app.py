@@ -77,6 +77,18 @@ INCOME_TAX_BRACKETS = [
     (float('inf'), 0.45, 4796000)
 ]
 
+# --- Affiliate Links Master Config (ASP取得後にここを書き換えるだけで全箇所に反映) ---
+AFFILIATE_LINKS = {
+    "fp_consult": "https://example.com/?a=fp_consult",       # 🥇 1位: FP無料相談・保険見直し (マネーキャリア等)
+    "mortgage": "https://example.com/?a=mogecheck",          # 🥈 2位: 住宅ローン比較・借換診断 (モゲチェック等)
+    "securities": "https://example.com/?a=securities",       # 🥉 3位: ネット証券・NISA・待機資金運用 (SBI/楽天等)
+    "credit_card": "https://example.com/?a=credit_card",     # 🥉 3位: クレカ積立用カード (三井住友カード等)
+    "real_estate": "https://example.com/?a=real_estate",     # 4位: 不動産一括査定 (イエウール/すまいステップ等)
+    "kakeibo_app": "https://example.com/?a=kakeibo_app",     # 5位: 無料家計簿アプリ (マネーフォワードME等)
+    "career_up": "https://example.com/?a=career_up"          # 番外: 年収アップ・転職エージェント
+}
+
+
 # --- Helper Functions ---
 def safe_number_input(label, min_value, max_value, default_value, step=1, **kwargs):
     """value（初期値）がmin_value〜max_valueの範囲外になってエラーで落ちるのを防ぐ安全な入力ウィジェット"""
@@ -1074,6 +1086,11 @@ with tabs[3]:
             use_reform_loan = False
             reform_loan_rate = reform_loan_years = 0
 
+        if has_existing_mortgage or has_housing:
+            st.caption(f"💡 **住宅ローン最適化のヒント：** 金利がわずか0.2〜0.3%違うだけで総支払額は数百万円変わります。現在の最安金利や借換メリットは [👉 住宅ローン無料診断（モゲチェック等 / PR）]({AFFILIATE_LINKS['mortgage']}) で1分で確認できます。")
+        if housing_type == "持ち家":
+            st.caption(f"🏠 **資産把握のヒント：** 持ち家の現在の売却相場を知っておくと老後計画の精度が上がります。[👉 机上でわかる無料不動産査定 (PR)]({AFFILIATE_LINKS['real_estate']})")
+
     with col2:
         st.subheader("自動車設定（本人）")
         has_car = st.checkbox("本人用の車の所有・購入あり", value=get_val("has_car", False))
@@ -1278,6 +1295,7 @@ with tabs[4]:
         with col_dpr3:
             dp_full_drop = safe_number_input("全額(100%)投入する下落幅 (%)", min_value=0.1, max_value=100.0, default_value=get_pct_val("dp_full_drop", 50.0), step=1.0, help="年間リターンがこの下落幅に達した年は、残りの待機資金を100%全力投入します。") / 100
 
+        
         dp_calc_opts = [
             "累積・残高基準（通過ステップごとにその時の残高の〇%を順次投入）",
             "累積・当初枠基準（通過ステップの投入率を単純合算して投入）",
@@ -1305,6 +1323,10 @@ with tabs[4]:
             step_idx += 1
         preview_texts.append(f"**-{dp_full_drop*100:g}%**以上: **100%（全額）**投入")
         st.caption("💡 現在の設定による年間投入率の目安： " + " ／ ".join(preview_texts))
+        
+        # ▼▼▼ ここに追加（上の st.caption とまったく同じインデント幅・半角スペース8個） ▼▼▼
+        st.caption(f"💧 **待機資金の置き場について：** 暴落待機資金を普通預金に眠らせず、個人向け国債（変動10年）や証券連携の高金利口座（年利1.0%前後）に置くには [👉 NISA・待機資金運用に強いネット証券比較 (PR)]({AFFILIATE_LINKS['securities']}) を活用するのが定番です。")
+
     else:
         initial_dry_powder = dp_max_cap = 0
         dp_max_rate = 0.0
@@ -1315,6 +1337,8 @@ with tabs[4]:
         dp_step_rate = 0.10
         dp_full_drop = 0.50
         dp_calc_mode = "累積・残高基準（通過ステップごとにその時の残高の〇%を順次投入）"
+
+
 
    # ▼▼▼ 4. シミュレーション・リターン設定（タブ5の最後に配置） ▼▼▼
     st.divider()
@@ -1416,6 +1440,10 @@ with tabs[5]:
     insurance_premium_monthly = safe_number_input("毎月の民間保険料合計(万円/月)", min_value=0, max_value=100, default_value=int(get_val("insurance_premium_monthly", 0)/10000), step=1) * 10000
     insurance_premium_yearly = insurance_premium_monthly * 12
     st.caption("※医療保険、掛け捨て生命保険、がん保険などの毎月の固定費を入力してください。シミュレーション上の「基本生活費」とは完全に別枠で集計されます。")
+
+    if insurance_premium_monthly >= 10000:
+        st.caption(f"💡 **固定費削減のヒント：** 日本は高額療養費制度などの公的保険が手厚いため、民間保険を見直すだけで月1〜2万円浮くケースが多々あります。[👉 無料でFPに保険の重複チェックを相談する (PR)]({AFFILIATE_LINKS['fp_consult']})")
+
     st.divider()
 
     st.subheader("■ 公的年金")
@@ -1683,6 +1711,8 @@ with tabs[6]:
     else:
         base_expense = st.number_input("現在の基本生活費(全年代一律・保険住居除く・万円/年)", value=int(get_val("base_expense", 2500000) / 10000 if get_val("base_expense", 2500000) > 10000 else get_val("base_expense", 250)), step=10) * 10000
         base_exp_20s = base_exp_30s = base_exp_40s = base_exp_50s = base_exp_60s = base_exp_70s_plus = 0
+
+    st.caption(f"📱 **正確な生活費がわからない方へ：** 銀行やクレカを自動連携できる [👉 人気の無料家計簿アプリ (PR)]({AFFILIATE_LINKS['kakeibo_app']}) を使うと、住居費や保険料を除いた正確な基本生活費が一目で把握できます。")
         
     inflation_rate = st.number_input("インフレ率 (%)", min_value=0.0, max_value=5.0, value=get_val("inflation_rate", 0.015)*100, step=0.1) / 100
     
@@ -3141,6 +3171,61 @@ try:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
+# --- ★新設：シミュレーション数値連動型「AI家計・資産改善ポテンシャル診断」 ---
+    with st.container(border=True):
+        st.markdown("##### 💡 シミュレーション数値に基づく「家計・資産の改善ポテンシャル診断」")
+        diag_cols = st.columns(3)
+        
+        # 診断1：住宅ローンの金利引き下げポテンシャル（設定中のローンがある場合、金利-0.3%での削減額を実計算）
+        with diag_cols[0]:
+            if housing_type == "持ち家" and has_existing_mortgage and ex_housing_loan_balance > 0 and ex_housing_loan_rate > 0.004:
+                reduced_rate = max(0.003, ex_housing_loan_rate - 0.003)
+                pmt_curr, _ = generate_mortgage_schedule(ex_housing_loan_balance, ex_housing_loan_rate, ex_housing_loan_years_remaining)
+                pmt_low, _ = generate_mortgage_schedule(ex_housing_loan_balance, reduced_rate, ex_housing_loan_years_remaining)
+                save_loan_man = max(10, int((np.sum(pmt_curr) - np.sum(pmt_low)) / 10000))
+                st.markdown(f"🏠 **住宅ローン見直し効果**\n\n現在の残高（{format_man_oku_val(ex_housing_loan_balance/10000)}）の金利がもし **0.3%下がれば**、完済までの総支払額が **約{format_man_oku_val(save_loan_man)} 削減**できます。")
+                st.link_button("👉 モゲチェックで借換メリットを無料診断 (PR)", AFFILIATE_LINKS["mortgage"], use_container_width=True)
+            elif has_housing and housing_loan_amount > 0:
+                reduced_rate = max(0.003, housing_loan_rate - 0.003)
+                pmt_curr, _ = generate_mortgage_schedule(housing_loan_amount, housing_loan_rate, housing_loan_years)
+                pmt_low, _ = generate_mortgage_schedule(housing_loan_amount, reduced_rate, housing_loan_years)
+                save_loan_man = max(10, int((np.sum(pmt_curr) - np.sum(pmt_low)) / 10000))
+                st.markdown(f"🏠 **新規住宅ローンの金利比較効果**\n\n借入予定（{format_man_oku_val(housing_loan_amount/10000)}）の金利を **0.3%低く** 選ぶだけで、総返済額が **約{format_man_oku_val(save_loan_man)} お得**になります。")
+                st.link_button("👉 住宅ローンの最安金利を比較・診断する (PR)", AFFILIATE_LINKS["mortgage"], use_container_width=True)
+            else:
+                # ローンがない場合はクレカ積立＋証券口座のポテンシャルを表示
+                annual_inv_man = (invest_monthly + (sp_invest_monthly if has_marriage else 0)) * 12 / 10000
+                invest_yrs = max(5, invest_end_age - current_age) if has_investment else 20
+                pt_gain_man = max(5, int(min(120, max(36, annual_inv_man)) * 0.01 * invest_yrs))
+                st.markdown(f"💳 **クレカ積立＆非課税枠の活用**\n\n毎月の積立をネット証券×高還元クレカで行うだけで、運用益とは別に **累計 約{pt_gain_man}万円相当のポイント** が自動で貯まります。")
+                st.link_button("👉 NISA・クレカ積立に強いネット証券を見る (PR)", AFFILIATE_LINKS["securities"], use_container_width=True)
+
+        # 診断2：保険料・固定費の見直し→投資スイープ効果（85歳時点の複利効果を実計算）
+        with diag_cols[1]:
+            yrs_to_85 = max(10, 85 - current_age)
+            monthly_cut_target = 1.0 if insurance_premium_monthly >= 10000 else 1.5
+            r_net = max(0.03, expected_return * 0.8)
+            fv_cut_man = int((monthly_cut_target * 12) * (((1 + r_net)**yrs_to_85 - 1) / r_net))
+            if insurance_premium_monthly >= 10000:
+                st.markdown(f"🛡️ **民間保険の見直し＋運用効果**\n\n毎月の保険料（{int(insurance_premium_monthly/10000)}万円）を見直して **月1万円削減** しNISAで運用すると、85歳時点の純資産が **＋{format_man_oku_val(fv_cut_man)} 増加**します。")
+            else:
+                st.markdown(f"🔍 **ライフプランの『答え合わせ』**\n\n固定費や保険・税制の最適化で **月1.5万円** の余剰を作り運用に回せれば、85歳時点の純資産は **＋{format_man_oku_val(fv_cut_man)} 上乗せ**されます。")
+            st.link_button("👨‍💼 【無料】FPに家計とプランの最適化を相談 (PR)", AFFILIATE_LINKS["fp_consult"], use_container_width=True)
+
+        # 診断3：待機資金（ドライパウダー）の金利差 or 自宅査定ポテンシャル
+        with diag_cols[2]:
+            if has_dry_powder and (initial_dry_powder > 0 or dp_max_cap > 0):
+                base_dp_man = max(initial_dry_powder, dp_max_cap) / 10000
+                dp_gain_man = max(10, int(base_dp_man * ((1.01 ** min(30, yrs_to_85)) - 1)))
+                st.markdown(f"💧 **待機資金（{format_man_oku_val(base_dp_man)}）の平時利回り効果**\n\n待機資金を普通預金ではなく個人向け国債や高金利口座（年1%想定）に置くだけで、平時でも **約＋{format_man_oku_val(dp_gain_man)}** の収益差が生まれます。")
+                st.link_button("🚀 待機資金の運用に最適な証券・銀行口座 (PR)", AFFILIATE_LINKS["securities"], use_container_width=True)
+            elif housing_type == "持ち家" or has_housing:
+                st.markdown("🏢 **自宅の資産価値（純資産）の可視化**\n\n持ち家は最大の資産です。現在の正確な売却相場を把握しておくことで、老後の住み替えや老人ホーム入居資金の計画が盤石になります。")
+                st.link_button("🏠 無料で自宅の現在の査定額を調べてみる (PR)", AFFILIATE_LINKS["real_estate"], use_container_width=True)
+            else:
+                st.markdown("📱 **生活費の精緻化でシミュレーション精度UP**\n\n家計簿アプリで現在の正確な支出を把握し、月5,000円のムダを削るだけで生涯の資産寿命は大きく伸びます。")
+                st.link_button("📱 人気の無料家計簿アプリを試してみる (PR)", AFFILIATE_LINKS["kakeibo_app"], use_container_width=True)
+
     if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
         st.markdown("### 🎲 モンテカルロ・シミュレーション推移（300回試行・ストレステスト）")
         st.caption("※下位10%の悲観シナリオは、暴落相場や長期低迷に直面した場合のストレステストとして機能します。")
@@ -3367,41 +3452,61 @@ try:
             df_ret_tax = pd.DataFrame(res["arr_ret_tax_details"])
             st.dataframe(df_ret_tax, use_container_width=True, hide_index=True)
 
-    # --- アフィリエイト・ネクストアクション エリア ---
+    # --- アフィリエイト・ネクストアクション エリア（全ジャンル網羅・4カード構成） ---
     st.markdown("---")
-    st.markdown("### 💡 シミュレーション結果からのネクストアクション")
-    st.write("あなたのシミュレーション結果に基づいた、おすすめのアクションです。")
+    st.markdown("### 🚀 シミュレーション結果を現実にする4つのネクストアクション")
+    st.caption("※設計したライフプランを実行に移すための、おすすめの無料ツール・相談窓口です。")
 
-    st.subheader("📱 まずは日々の家計を可視化しよう")
-    st.write("精度の高いシミュレーションを行うには、現在の支出を正確に把握することが重要です。銀行やクレカと自動連携できる家計簿アプリがおすすめです。")
-    st.link_button("人気の無料家計簿アプリをインストールする (PR)", "https://example.com/?a=kakeibo")
+    col_act1, col_act2 = st.columns(2)
+    with col_act1:
+        with st.container(border=True):
+            if depletion_age is not None or (sim_mode != "定率シミュレーション（基本）" and depletion_age_p10 is not None):
+                st.error("🥇 **Step 1：プロのFPと「資金不足の解消・保険見直し」を行う**")
+                st.write("悲観シナリオ等で資金不足が予測されています。自己判断で無理なリスクを取る前に、まずはプロと一緒に「保険料などの固定費削減」や「無理のない収支改善」を行うのが最も確実です。")
+            else:
+                st.success("🥇 **Step 1：作ったプランに死角がないかプロのFPと「答え合わせ」する**")
+                st.write("シミュレーション上は非常に優秀な結果です！このプラン（URL）をそのままFPに見せて、相続や税制改正、教育費・住宅費の見落としがないか無料のセカンドオピニオンを受けてみましょう。")
+            st.link_button("👨‍💼 【無料】プロにライフプラン・保険見直しを相談する (PR)", AFFILIATE_LINKS["fp_consult"], use_container_width=True)
 
-    col_btn1, col_btn2 = st.columns(2)
-    
-    with col_btn1:
-        if depletion_age is not None or (sim_mode != "定率シミュレーション（基本）" and depletion_age_p10 is not None):
-            st.error("📉 **将来の資金不足が予測されます**")
-            st.write("支出の見直しや、収入アップの検討が必要です。プロに相談するか、まずは固定費の削減から始めましょう。")
-            st.link_button("👨‍💼 【無料】プロにライフプラン・家計を相談する (PR)", "https://example.com/?a=fp")
-            st.link_button("📱 スマホ代を見直して固定費を下げる (PR)", "https://example.com/?a=sim")
-            st.link_button("💼 転職エージェントに登録して収入アップを目指す (PR)", "https://example.com/?a=tenshoku")
-        else:
-            st.success("📈 **将来の資金計画は順調です！**")
-            st.write("この調子で資産形成を進めましょう。NISAなどの非課税制度や、お得なポイント還元をフル活用するのがおすすめです。")
-            st.link_button("🚀 ネット証券（NISA口座）を比較・開設する (PR)", "https://example.com/?a=sec")
-            st.link_button("💳 積立投資でお得にポイントが貯まるクレカを作る (PR)", "https://example.com/?a=card")
+        with st.container(border=True):
+            st.info("🥉 **Step 3：NISA枠の最大化 ＆ 暴落待機資金の専用口座を準備する**")
+            st.write("新NISAでの自動積立や、暴落時に機動的に買い向かうための待機資金（MMF・個人向け国債・高金利連携預金）は、手数料が安くポイント還元率の高いネット証券＋クレカの組み合わせが必須です。")
+            c_sec1, c_sec2 = st.columns(2)
+            with c_sec1:
+                st.link_button("🚀 ネット証券を比較・開設 (PR)", AFFILIATE_LINKS["securities"], use_container_width=True)
+            with c_sec2:
+                st.link_button("💳 積立でお得なクレカ (PR)", AFFILIATE_LINKS["credit_card"], use_container_width=True)
 
-    with col_btn2:
-        has_mortgage_balance = res["arr_debt_housing"].sum() > 0
-        if has_mortgage_balance:
-            st.info("🏠 **住宅ローンの見直しで数百万円浮くかも？**")
-            st.write("住宅ローン残高があります。金利の低いネット銀行などに借り換えることで、毎月の返済額や総支払額を大きく減らせる可能性があります。")
-            st.link_button("👉 モゲチェックで最適な借り換え金利を比較する (PR)", "https://example.com/?a=mogecheck")
-            
-        if (housing_type == "持ち家" or has_housing) and (depletion_age is not None or has_home_sale):
-            st.warning("🏢 **ご自宅の価値を確認してみませんか？**")
-            st.write("将来の資金不足や老人ホーム入居に向けて、現在の自宅の売却相場を知っておくことは資産形成において非常に重要です。")
-            st.link_button("🏠 無料で不動産の一括査定を申し込む (PR)", "https://example.com/?a=fudosan")
+    with col_act2:
+        with st.container(border=True):
+            st.warning("🥈 **Step 2：人生最大の固定費「住居費・住宅ローン」を最適化する**")
+            st.write("住宅ローンの金利引き下げ（借り換え・新規比較）や、持ち家の現在の売却相場を把握することは、一度の手続きで数百万円単位の純資産改善につながる最もコスパの高いアクションです。")
+            c_est1, c_est2 = st.columns(2)
+            with c_est1:
+                st.link_button("🏠 モゲチェックで金利診断 (PR)", AFFILIATE_LINKS["mortgage"], use_container_width=True)
+            with c_est2:
+                st.link_button("🏢 自宅の無料一括査定 (PR)", AFFILIATE_LINKS["real_estate"], use_container_width=True)
+
+        with st.container(border=True):
+            st.markdown("📱 **Step 4：日々の家計の自動化 ＆ 収入アップで入金力を高める**")
+            st.write("シミュレーションの精度をさらに高めるには、銀行・クレカ連携アプリでの支出の自動可視化と、本業・副業での入金力アップ（昇給・転職）が両輪となります。")
+            c_sub1, c_sub2 = st.columns(2)
+            with c_sub1:
+                st.link_button("📱 無料家計簿アプリ (PR)", AFFILIATE_LINKS["kakeibo_app"], use_container_width=True)
+            with c_sub2:
+                st.link_button("💼 転職で年収アップ診断 (PR)", AFFILIATE_LINKS["career_up"], use_container_width=True)
+
+    # --- ★ASP審査通過・コンプライアンス遵守のための免責事項・PR表記 ---
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("⚖️ 免責事項・広告掲載（PR）およびプライバシーポリシーについて"):
+        st.markdown("""
+        * **免責事項（シミュレーション結果について）：**  
+          当シミュレータ（最強ライフプランシミュレータ）は、利用者ご自身が入力された条件および一定の統計的・税制的仮定に基づく概算試算ツールであり、将来の運用成果や資産額、税額等を保証するものではありません。また、特定の金融商品の勧誘や投資助言を行うものではありません。最終的な投資判断や住宅購入・保険契約等の決定は、ご自身の判断と責任において行われますようお願いいたします。
+        * **広告掲載（アフィリエイトプログラム）について：**  
+          当ツール内のリンクの一部には、アフィリエイトプログラム（PR・広告）が含まれています。リンク先のサービス・商品に関するお問い合わせは、各提供元企業様へ直接お願いいたします。
+        * **データの取り扱いとプライバシーについて：**  
+          当ツールに入力された年収・資産等の個人データは、ブラウザ上の計算および「設定をURLに保存」機能（URL文字列への圧縮変換）にのみ使用され、当サイトのサーバーや外部データベースへ勝手に送信・保存されることはありませんので安心してご利用ください。
+        """)
 
 except Exception as e:
     st.error(f"シミュレーション中にエラーが発生しました: {e}")
