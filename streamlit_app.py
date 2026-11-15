@@ -857,7 +857,12 @@ with tabs[0]:
     if actual_is_working and gross_income > 0:
         est_furusato_main = calc_furusato_limit(gross_income, age=current_age, is_working=True)
         if est_furusato_main >= 10000:
-            st.caption(f"🎁 **ふるさと納税の上限目安：** 現在の年収（{int(gross_income/10000)}万円）での年間寄付上限は **約 {est_furusato_main/10000:,.1f} 万円**（{est_furusato_main:,}円）です（iDeCoや扶養控除は下部サマリーで自動反映）。[👉 人気のふるさと納税サイトで返礼品を見る (PR)]({AFFILIATE_LINKS['furusato']})")
+            col_f1, col_f2 = st.columns([7, 3])
+            with col_f1:
+                st.info(f"🎁 **本人のふるさと納税 控除上限目安：約 {est_furusato_main/10000:,.1f} 万円** （{est_furusato_main:,}円 / 年）\n\n※iDeCoや扶養控除まで加味した世帯合計の精密上限額は、下の「結果サマリー」で自動計算されます。")
+            with col_f2:
+                st.write("")
+                st.link_button(f"🎁 上限{est_furusato_main/10000:,.1f}万円で返礼品を探す (PR)", AFFILIATE_LINKS["furusato"], type="primary", use_container_width=True)
 
 with tabs[1]:
     st.header("配偶者の基本・収入・退職")
@@ -923,6 +928,17 @@ with tabs[1]:
         else:
             sp_post_retirement_income = 0
             sp_post_retirement_end_age = 0
+
+        if actual_sp_working and sp_gross_income > 0:
+            est_furusato_sp = calc_furusato_limit(sp_gross_income, age=current_age + sp_age_diff, is_working=True)
+            if est_furusato_sp >= 10000:
+                col_sf1, col_sf2 = st.columns([7, 3])
+                with col_sf1:
+                    st.info(f"🎁 **配偶者のふるさと納税 控除上限目安：約 {est_furusato_sp/10000:,.1f} 万円** （{est_furusato_sp:,}円 / 年）")
+                with col_sf2:
+                    st.write("")
+                    st.link_button(f"🎁 配偶者枠で返礼品を探す (PR)", AFFILIATE_LINKS["furusato"], type="primary", use_container_width=True)
+
     else:
         sp_age_diff = marriage_age = wedding_cost = sp_gross_income = sp_salary_growth = 0
         sp_employment_start_age = 22
@@ -1378,7 +1394,6 @@ with tabs[4]:
         dp_step_rate = 0.10
         dp_full_drop = 0.50
         dp_calc_mode = "累積・残高基準（通過ステップごとにその時の残高の〇%を順次投入）"
-
 
 
    # ▼▼▼ 4. シミュレーション・リターン設定（タブ5の最後に配置） ▼▼▼
@@ -3229,11 +3244,21 @@ try:
         st.markdown("##### 💡 シミュレーション数値に基づく「家計・資産の改善ポテンシャル診断」")
         if furusato_limit_total >= 10000:
             sp_fur_text = f"（本人: 約{furusato_limit_main/10000:,.1f}万円 ／ 配偶者: 約{furusato_limit_sp/10000:,.1f}万円）" if furusato_limit_sp > 0 else ""
-            col_fur_txt, col_fur_btn = st.columns([7, 3])
+            est_gift_value = int((furusato_limit_total * 0.30) // 1000) * 1000
+            col_fur_txt, col_fur_btn = st.columns([6.5, 3.5])
             with col_fur_txt:
-                st.markdown(f"🎁 **今年のふるさと納税 控除上限目安：世帯合計 約 {furusato_limit_total/10000:,.1f} 万円** {sp_fur_text}\n\n<span style='font-size:0.88rem;color:#495057;'>※年収・社会保険料・iDeCo掛金・扶養家族をすべて反映した目安です。実質2,000円の負担でお米や食材・日用品を受け取ることで、毎年の基本生活費（食費等）を確実に圧縮できます。</span>", unsafe_allow_html=True)
+                st.success(
+                    f"🎁 **【今年の節税枠】ふるさと納税 控除上限目安：世帯合計 約 {furusato_limit_total/10000:,.1f} 万円** {sp_fur_text}\n\n"
+                    f"実質2,000円の自己負担で、毎年 **約 {est_gift_value:,} 円相当**（返礼率30%換算）のお米・食材・日用品を受け取って基本生活費を直接浮かせることができます。（※iDeCo掛金・扶養控除・社会保険料をすべて反映済）"
+                )
             with col_fur_btn:
-                st.link_button(f"🎁 上限{furusato_limit_total/10000:,.1f}万円以内で返礼品を探す (PR)", AFFILIATE_LINKS["furusato"], use_container_width=True)
+                st.write("")
+                st.link_button(
+                    f"🎁 上限 {furusato_limit_total/10000:,.1f}万円 以内の人気返礼品を見る (PR)",
+                    AFFILIATE_LINKS["furusato"],
+                    type="primary",
+                    use_container_width=True
+                )
             st.divider()
 
         diag_cols = st.columns(3)
@@ -3554,7 +3579,8 @@ try:
             st.write("ふるさと納税による食費・日用品費の削減、家計簿アプリでの支出の自動可視化、そして本業・副業での入金力アップ（昇給・転職）が資産形成を加速させます。")
             c_sub1, c_sub2, c_sub3 = st.columns(3)
             with c_sub1:
-                st.link_button("🎁 ふるさと納税 (PR)", AFFILIATE_LINKS["furusato"], use_container_width=True)
+                fur_btn_label = f"🎁 ふるさと納税(上限{furusato_limit_total/10000:,.1f}万) (PR)" if furusato_limit_total >= 10000 else "🎁 ふるさと納税 (PR)"
+                st.link_button(fur_btn_label, AFFILIATE_LINKS["furusato"], type="primary", use_container_width=True)
             with c_sub2:
                 st.link_button("📱 無料家計簿アプリ (PR)", AFFILIATE_LINKS["kakeibo_app"], use_container_width=True)
             with c_sub3:
