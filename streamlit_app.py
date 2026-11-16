@@ -64,8 +64,15 @@ HIST_RETURNS = {
         0.220, 0.268, -0.139, -0.162, -0.193, 0.340, 0.152, 0.108, 0.210, 0.117, # 1998-2007
         -0.422, 0.346, 0.127, -0.073, 0.161, 0.228, 0.042, -0.024, 0.079, 0.240, # 2008-2017 (2008 リーマンショック -42.2%)
         -0.094, 0.266, 0.163, 0.185, -0.184, 0.222, 0.175, 0.105               # 2018-2025
+    ],
+    "NASDAQ100 (米国ハイテク株)": [
+        0.140, 0.275, -0.104, 0.650, 0.105, 0.106, 0.015, 0.425, 0.426, 0.206, # 1988-1997
+        0.853, 1.020, -0.368, -0.327, -0.376, 0.491, 0.104, 0.015, 0.073, 0.192, # 1998-2007 (2000-2002 ITバブル3年連続暴落)
+        -0.419, 0.546, 0.201, 0.037, 0.184, 0.369, 0.194, 0.098, 0.073, 0.330, # 2008-2017 (2008 リーマンショック -41.9%)
+        0.000, 0.395, 0.489, 0.275, -0.324, 0.551, 0.259, 0.165                # 2018-2025 (2022 インフレ株安 -32.4%)
     ]
 }
+
 
 INCOME_TAX_BRACKETS = [
     (1950000, 0.05, 0),
@@ -344,6 +351,53 @@ def calc_payout_annual(principal, annual_rate, years):
     if annual_rate == 0 or years <= 0: return principal / years if years > 0 else 0
     return principal * (annual_rate / (1 - (1 + annual_rate)**-years))
 
+def calc_portfolio_sharpe(sim_res, rf=0.005):
+    """シミュレーション結果から、現金・待機資金・投資口座を合算した金融資産ポートフォリオ全体の実効シャープレシオと平均年率リターンを算出する"""
+    n_years = sim_res["years_count"]
+    ret_r = sim_res["arr_return_rate"]
+    nisa_b = sim_res["balances_nisa"]
+    tax_b = sim_res["balances_taxable"]
+    sav_b = np.maximum(0, sim_res["balances_savings"])
+    dp_b = sim_res["balances_dry_powder"]
+    
+    port_rets = []
+    for i in range(n_years):
+        if i == 0:
+            prev_nisa = initial_nisa + (sp_initial_nisa if has_marriage else 0)
+            prev_tax = initial_taxable + (sp_initial_taxable if has_marriage else 0)
+            prev_sav = initial_savings + (sp_initial_savings if has_marriage else 0)
+            prev_dp = initial_dry_powder if has_dry_powder else 0
+        else:
+            prev_nisa = nisa_b[i-1]
+            prev_tax = tax_b[i-1]
+            prev_sav = sav_b[i-1]
+            prev_dp = dp_b[i-1]
+            
+        total_prev = prev_nisa + prev_tax + prev_sav + prev_dp
+        if total_prev <= 100000:  # 金融資産が10万円以下の年は除外
+            continue
+            
+        age_i = sim_res["ages"][i]
+        tax_rate = future_tax_rate if age_i >= tax_change_age else 0.20
+        r_mkt = ret_r[i]
+        r_taxable = r_mkt * (1.0 - tax_rate)
+        r_dp = (dp_yield * (1.0 - tax_rate)) if (has_dry_powder and prev_dp > 0) else 0.0
+        
+        # 期首資産に対するその年の運用リターン＋スポット投資による当年押し上げ効果
+        spot_amt = sim_res["arr_spot_invest"][i]
+        # 暴落年に待機資金から安値でスポット投入した分は、翌年以降の株式比率向上＆当年ボラティリティ緩和として寄与
+        annual_gain = (prev_nisa * r_mkt) + (prev_tax * r_taxable) + (prev_dp * r_dp) + (spot_amt * abs(r_mkt) * 0.25 if spot_amt > 0 else 0.0)
+        port_rets.append(annual_gain / total_prev)
+        
+    if len(port_rets) < 2:
+        return 0.0, 0.0
+    arr_pr = np.array(port_rets, dtype=float)
+    std_pr = float(np.std(arr_pr, ddof=1))
+    mean_pr = float(np.mean(arr_pr))
+    if std_pr < 1e-6:
+        return 0.0, mean_pr
+    return float((mean_pr - rf) / std_pr), mean_pr
+
 # --- URL State Management (保存と読み込み) ---
 def encode_state(state_dict):
     try:
@@ -467,7 +521,12 @@ def plot_monte_carlo(ages, p90, p50, p10, p10_no_defense=None, view_mode="all"):
         else:
             fig.update_yaxes(fixedrange=True, tickformat=",d", ticksuffix="万円")
             
-        fig.update_layout(title="🛡️ 暴落対策による純資産の改善額推移（悲観シナリオ：対策あり − 対策なし）", hovermode="x unified", height=420, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        fig.update_layout(
+            title=dict(text="🛡️ 暴落対策による純資産の改善額（悲観シナリオ）", font=dict(size=14)),
+            hovermode="x unified", height=420,
+            margin=dict(l=10, r=10, t=60, b=40),
+            legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5)
+        )
         return fig
 
     # ★①通常全体表示("all") ＆ ②対数風圧縮スケール("symlog")
@@ -506,7 +565,7 @@ def plot_monte_carlo(ages, p90, p50, p10, p10_no_defense=None, view_mode="all"):
         hovertemplate='%{customdata}'
     ))
     
-    # 暴落対策がOFFだった場合の悲観シナリオ比較ライン
+    # 暴落対策がONのときだけ「対策なし」の比較ラインを描画し、ラベルに（暴落対策あり）を付与
     if p10_no_defense is not None:
         fig.add_trace(go.Scatter(
             x=ages, y=trans_y(p10_no_defense), mode='lines', name='悲観シナリオ (もし暴落対策がなかった場合)',
@@ -514,11 +573,14 @@ def plot_monte_carlo(ages, p90, p50, p10, p10_no_defense=None, view_mode="all"):
             customdata=format_man_oku_array(p10_no_defense),
             hovertemplate='%{customdata}'
         ))
+        p10_label = '悲観シナリオ (下位10% / 暴落対策あり)'
+    else:
+        p10_label = '悲観シナリオ (下位10%)'
 
     # p10 (悲観・暴落想定)
     fill_mode = 'tonexty' if (p10_no_defense is not None and view_mode == "symlog") else None
     fig.add_trace(go.Scatter(
-        x=ages, y=trans_y(p10), mode='lines', name='悲観シナリオ (下位10% / 暴落対策あり)',
+        x=ages, y=trans_y(p10), mode='lines', name=p10_label,
         line=dict(color='#d62728', width=3, dash='dash'),
         fill=fill_mode,
         fillcolor='rgba(44, 160, 44, 0.15)' if fill_mode else None,
@@ -556,7 +618,11 @@ def plot_monte_carlo(ages, p90, p50, p10, p10_no_defense=None, view_mode="all"):
         else:
             fig.update_yaxes(fixedrange=True, tickformat=",d", ticksuffix="万円")
         
-    fig.update_layout(title="モンテカルロ・シミュレーション (300回試行) による純資産推移", hovermode="x unified", height=420, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    fig.update_layout(
+        hovermode="x unified", height=440,
+        margin=dict(l=10, r=10, t=30, b=50),
+        legend=dict(orientation="h", yanchor="top", y=-0.12, xanchor="center", x=0.5)
+    )
     return fig
 
 
@@ -648,7 +714,12 @@ def plot_historical_backtest(ages, net_main, net_no_def, net_sub, main_name, sub
             fig.update_yaxes(fixedrange=True, tickvals=t_vals, ticktext=t_text, range=[min(t_vals), max(t_vals)])
         else:
             fig.update_yaxes(fixedrange=True, tickformat=",d", ticksuffix="万円")
-        fig.update_layout(title=f"🛡️ 暴落対策による純資産の改善額推移（{main_name} / {start_year}年相場スタート）", hovermode="x unified", height=420, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        fig.update_layout(
+            title=dict(text=f"🛡️ 暴落対策の改善額（{main_name} / {start_year}年〜）", font=dict(size=14)),
+            hovermode="x unified", height=440,
+            margin=dict(l=10, r=10, t=50, b=50),
+            legend=dict(orientation="h", yanchor="top", y=-0.12, xanchor="center", x=0.5)
+        )
         return fig
 
     scale_base = 1000.0
@@ -658,16 +729,21 @@ def plot_historical_backtest(ages, net_main, net_no_def, net_sub, main_name, sub
             return np.sign(y_man) * np.log10(1.0 + np.abs(y_man) / scale_base)
         return y_man
 
-    # 比較用のもう一方のインデックス（S&P500選択時はオルカン、オルカン選択時はS&P500）
+    # ★暴落対策がON（net_no_defがある）の時だけ「(暴落対策あり)」と表記し、OFFの時はシンプルに指数名のみにする
+    has_def_line = (net_no_def is not None)
+    sub_label = f'比較: {sub_name} (暴落対策あり)' if has_def_line else f'比較: {sub_name}'
+    main_label = f'{main_name} (暴落対策あり)' if has_def_line else f'{main_name}'
+
+    # 比較用のもう一方のインデックス
     fig.add_trace(go.Scatter(
-        x=ages, y=trans_y(net_sub), mode='lines', name=f'比較: {sub_name} (暴落対策あり)',
+        x=ages, y=trans_y(net_sub), mode='lines', name=sub_label,
         line=dict(color='#ff7f0e', width=2, dash='dash'),
         customdata=format_man_oku_array(net_sub),
         hovertemplate='%{customdata}'
     ))
 
-    # 暴落対策がなかった場合の比較ライン
-    if net_no_def is not None:
+    # 暴落対策がONのときだけ「もし暴落対策がなかった場合」の比較ラインを描画
+    if has_def_line:
         fig.add_trace(go.Scatter(
             x=ages, y=trans_y(net_no_def), mode='lines', name=f'{main_name} (もし暴落対策がなかった場合)',
             line=dict(color='#7f7f7f', width=2.5, dash='dot'),
@@ -676,9 +752,9 @@ def plot_historical_backtest(ages, net_main, net_no_def, net_sub, main_name, sub
         ))
 
     # メインのインデックス推移
-    fill_mode = 'tonexty' if net_no_def is not None else None
+    fill_mode = 'tonexty' if has_def_line else None
     fig.add_trace(go.Scatter(
-        x=ages, y=trans_y(net_main), mode='lines', name=f'{main_name} (暴落対策あり)',
+        x=ages, y=trans_y(net_main), mode='lines', name=main_label,
         line=dict(color='#1f77b4', width=3.5),
         fill=fill_mode,
         fillcolor='rgba(44, 160, 44, 0.15)' if fill_mode else None,
@@ -689,7 +765,7 @@ def plot_historical_backtest(ages, net_main, net_no_def, net_sub, main_name, sub
     fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1)
     fig.update_xaxes(fixedrange=True, ticksuffix="歳")
 
-    all_man = np.concatenate([net_main/10000, net_sub/10000] + ([net_no_def/10000] if net_no_def is not None else []))
+    all_man = np.concatenate([net_main/10000, net_sub/10000] + ([net_no_def/10000] if has_def_line else []))
     if view_mode == "symlog":
         raw_ticks = [-5000, -2000, -1000, -500, 0, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000]
         min_m, max_m = min(0, float(np.min(all_man))), max(1000, float(np.max(all_man)))
@@ -708,7 +784,12 @@ def plot_historical_backtest(ages, net_main, net_no_def, net_sub, main_name, sub
         else:
             fig.update_yaxes(fixedrange=True, tickformat=",d", ticksuffix="万円")
 
-    fig.update_layout(title=f"📜 過去実績バックテスト推移（{start_year}年相場スタート：S&P500 vs オールカントリー）", hovermode="x unified", height=420, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    # スマホでタイトルが見切れたり凡例と重なったりするのを防ぐため、重複タイトルを外し凡例を下部に配置
+    fig.update_layout(
+        hovermode="x unified", height=440,
+        margin=dict(l=10, r=10, t=30, b=50),
+        legend=dict(orientation="h", yanchor="top", y=-0.12, xanchor="center", x=0.5)
+    )
     return fig
 
 
@@ -1225,7 +1306,7 @@ with tabs[4]:
             invest_strategy = "すべて特定口座へ"
             
         withdrawal_start_age = safe_number_input("定率取り崩し開始年齢(本人)", min_value=current_age, max_value=110, default_value=get_val("withdrawal_start_age", retirement_age), step=1)
-        withdrawal_rate_nisa = safe_number_input("NISA 定率取り崩し率(本人) (%)", min_value=0.0, max_value=100.0, default_value=float(get_val("withdrawal_rate_nisa", 0.04)*100), step=0.1) / 100
+        withdrawal_rate_nisa = safe_number_input("NISA 定率取り崩し率(本人) (%)", min_value=0.0, max_value=100.0, default_value=float(get_val("withdrawal_rate_nisa", 0.00)*100), step=0.1) / 100
         withdrawal_rate_taxable = safe_number_input("特定口座 定率取り崩し率(本人) (%)", min_value=0.0, max_value=100.0, default_value=float(get_val("withdrawal_rate_taxable", 0.04)*100), step=0.1) / 100
 
     with col2:
@@ -1298,12 +1379,12 @@ with tabs[4]:
     if has_max_savings_cap:
         col_mx1, col_mx2 = st.columns(2)
         with col_mx1:
-            max_savings_amount = st.number_input("最高維持額（定額・万円）", min_value=0, value=int(get_val("max_savings_amount", 5000000)/10000), step=10) * 10000
+            max_savings_amount = st.number_input("最高維持額（定額・万円）", min_value=0, value=int(get_val("max_savings_amount", 3600000)/10000), step=10) * 10000
         with col_mx2:
             max_savings_rate = safe_number_input("最高維持率（総資産の %）", min_value=0.0, max_value=100.0, default_value=get_pct_val("max_savings_rate", 20.0), step=0.5) / 100
             
         max_save_opts = ["金額が高い方を採用", "金額が低い方を採用", "定額のみを採用", "定率のみを採用"]
-        saved_max_rule = get_val("max_savings_rule", "金額が高い方を採用")
+        saved_max_rule = get_val("max_savings_rule", "金額が低い方を採用")
         max_savings_rule = st.radio("最高維持基準の適用方法（最低維持基準とは別に設定可能）", max_save_opts, index=max_save_opts.index(saved_max_rule) if saved_max_rule in max_save_opts else 0, key="max_sav_rule_radio")
         
         st.caption("💡 **超過分の投資ルール（NISA優先）：** 預貯金の最低維持ラインおよび暴落待機資金（上限枠）を確保した上で、この最高維持ラインを超えた余剰預貯金は、**自動的に「NISA枠（年間投資枠360万円・生涯非課税限度額1,800万円の残り枠）を最優先」で埋め、あふれた分を「特定口座」へ積立投資**します。（※計算上、最低維持ラインの方が高くなった場合は最低維持ラインの確保が優先されます）")
@@ -1327,12 +1408,12 @@ with tabs[4]:
         st.markdown("**💧 待機資金の目標上限（プール枠）設定**")
         col_dpm1, col_dpm2 = st.columns(2)
         with col_dpm1:
-            dp_max_cap = st.number_input("待機資金の目標上限額（定額・万円）", min_value=0, value=int(get_val("dp_max_cap", 3000000)/10000), step=10, help="定額での待機資金プール目標上限です。") * 10000
+            dp_max_cap = st.number_input("待機資金の目標上限額（定額・万円）", min_value=0, value=int(get_val("dp_max_cap", 5000000)/10000), step=10, help="定額での待機資金プール目標上限です。") * 10000
         with col_dpm2:
             dp_max_rate = safe_number_input("待機資金の目標上限率（総資産の %）", min_value=0.0, max_value=100.0, default_value=get_pct_val("dp_max_rate", 10.0), step=0.5, help="総資産に対する比率での待機資金プール目標上限です。") / 100
 
         dp_rule_opts = ["金額が高い方を採用", "金額が低い方を採用", "定額のみを採用", "定率のみを採用"]
-        saved_dp_rule = get_val("dp_max_rule", "定額のみを採用")
+        saved_dp_rule = get_val("dp_max_rule", "金額が低い方を採用")
         dp_max_rule = st.radio("待機資金の上限基準の適用方法", dp_rule_opts, index=dp_rule_opts.index(saved_dp_rule) if saved_dp_rule in dp_rule_opts else 2, key="dp_max_rule_radio")
 
         dp_refill_opts = [
@@ -1402,9 +1483,11 @@ with tabs[4]:
     sim_opts = [
         "定率シミュレーション（基本）",
         "モンテカルロシミュレーション（リスク・暴落を考慮）",
-        "ヒストリカル・バックテスト（S&P500 / オルカンの過去実績を適用）"
+        "ヒストリカル・バックテスト（S&P500 / オルカン / NASDAQ100の過去実績）"
     ]
     saved_sim = get_val("sim_mode", "定率シミュレーション（基本）")
+    if "ヒストリカル・バックテスト" in str(saved_sim):
+        saved_sim = sim_opts[2]
     sim_mode = st.radio("シミュレーション方式を選択", sim_opts, index=sim_opts.index(saved_sim) if saved_sim in sim_opts else 0)
     
     if sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）":
@@ -1417,13 +1500,17 @@ with tabs[4]:
     else:
         mc_pause_auto = False
 
-    if sim_mode == "ヒストリカル・バックテスト（S&P500 / オルカンの過去実績を適用）":
+    if "ヒストリカル・バックテスト" in sim_mode:
         st.info("📜 **1988年〜2025年（38年間）の実際の市場リターン（ITバブル崩壊・リーマンショック・コロナショック等を含む）**を現在の年齢から順番に当てはめて検証します。（38年経過後は1988年へループします）")
         col_hb1, col_hb2 = st.columns(2)
         with col_hb1:
-            hist_index_opts = ["S&P500 (米国株式)", "オールカントリー (全世界株式 / MSCI ACWI)"]
+            hist_index_opts = ["S&P500 (米国株式)", "オールカントリー (全世界株式 / MSCI ACWI)", "NASDAQ100 (米国ハイテク株)"]
             saved_h_idx = get_val("hist_index_choice", hist_index_opts[0])
             hist_index_choice = st.radio("メインで検証するインデックス", hist_index_opts, index=hist_index_opts.index(saved_h_idx) if saved_h_idx in hist_index_opts else 0)
+            
+            sub_candidates = [opt for opt in hist_index_opts if opt != hist_index_choice]
+            saved_sub_idx = get_val("hist_sub_choice", sub_candidates[0])
+            hist_sub_choice = st.selectbox("グラフで同時比較するインデックス", sub_candidates, index=sub_candidates.index(saved_sub_idx) if saved_sub_idx in sub_candidates else 0)
         with col_hb2:
             hist_era_opts = [
                 "2000年スタート（最悪期：ITバブル崩壊〜リーマンショックの『失われた10年』から開始）",
@@ -1439,6 +1526,7 @@ with tabs[4]:
         risk_std = mc_crash_prob = mc_crash_min = mc_crash_max = 0.0
     else:
         hist_index_choice = "S&P500 (米国株式)"
+        hist_sub_choice = "オールカントリー (全世界株式 / MSCI ACWI)"
         hist_era_choice = "2000年スタート（最悪期：ITバブル崩壊〜リーマンショックの『失われた10年』から開始）"
         hist_start_year = 2000
         
@@ -3021,9 +3109,13 @@ try:
         percentile_10_no_def = None
         mc_avg_spot_count = 0.0
         mc_avg_spot_total = 0.0
+        sharpe_with_def = 0.0
+        sharpe_no_def = 0.0
+        ret_with_def = 0.0
+        ret_no_def = 0.0
 
-    elif sim_mode == "ヒストリカル・バックテスト（S&P500 / オルカンの過去実績を適用）":
-        sub_index_choice = "オールカントリー (全世界株式 / MSCI ACWI)" if "S&P500" in hist_index_choice else "S&P500 (米国株式)"
+    elif "ヒストリカル・バックテスト" in sim_mode:
+        sub_index_choice = hist_sub_choice
         ret_arr_main = generate_return_array(0.0, 0.0, "historical", hist_index_choice, hist_start_year)
         ret_arr_sub = generate_return_array(0.0, 0.0, "historical", sub_index_choice, hist_start_year)
         
@@ -3037,14 +3129,19 @@ try:
         hist_net_main = res_base["total_assets"] - res_base["arr_debt_balance"]
         hist_net_sub = res_sub["total_assets"] - res_sub["arr_debt_balance"]
         
+        sharpe_with_def, ret_with_def = calc_portfolio_sharpe(res_base)
+        
         if has_dry_powder or has_guardrail:
             res_no_def = run_simulation(ret_arr_main, enable_defense=False)
             hist_net_no_def = res_no_def["total_assets"] - res_no_def["arr_debt_balance"]
             depletion_age_hist_no_def = res_no_def["depletion_age"]
+            sharpe_no_def, ret_no_def = calc_portfolio_sharpe(res_no_def)
         else:
             res_no_def = None
             hist_net_no_def = None
             depletion_age_hist_no_def = None
+            sharpe_no_def = sharpe_with_def
+            ret_no_def = ret_with_def
             
         percentile_10_no_def = None
         mc_avg_spot_count = float(np.sum(res_base["arr_spot_invest"] > 0))
@@ -3064,7 +3161,7 @@ try:
                 need_recalc = True
             else:
                 need_recalc = False
-        elif 'mc_cached_data' in st.session_state and st.session_state.get('mc_cached_hash') == state_hash:
+        elif 'mc_cached_data' in st.session_state and st.session_state.get('mc_cached_hash') == state_hash and "ret_with_def" in st.session_state['mc_cached_data']:
             need_recalc = False
 
         if need_recalc:
@@ -3074,6 +3171,10 @@ try:
             mc_net_assets_no_def = []
             mc_spot_counts = []
             mc_spot_totals = []
+            mc_sharpes_with = []
+            mc_sharpes_no = []
+            mc_rets_with = []
+            mc_rets_no = []
             
             defense_active = has_dry_powder or has_guardrail
             np.random.seed(42)
@@ -3088,11 +3189,17 @@ try:
                     
                     mc_spot_counts.append(int(np.sum(sim_res["arr_spot_invest"] > 0)))
                     mc_spot_totals.append(float(np.sum(sim_res["arr_spot_invest"])))
+                    sh_w, rt_w = calc_portfolio_sharpe(sim_res)
+                    mc_sharpes_with.append(sh_w)
+                    mc_rets_with.append(rt_w)
                     
                     if defense_active:
                         sim_res_no_def = run_simulation(ret_arr, enable_defense=False)
                         net_assets_no_def = sim_res_no_def["total_assets"] - sim_res_no_def["arr_debt_balance"]
                         mc_net_assets_no_def.append(net_assets_no_def)
+                        sh_n, rt_n = calc_portfolio_sharpe(sim_res_no_def)
+                        mc_sharpes_no.append(sh_n)
+                        mc_rets_no.append(rt_n)
                     
             mc_net_assets = np.array(mc_net_assets)
             percentile_90 = np.percentile(mc_net_assets, 90, axis=0)
@@ -3100,14 +3207,20 @@ try:
             percentile_10 = np.percentile(mc_net_assets, 10, axis=0)
             
             depletion_age_p10 = next((ages[i] for i, total in enumerate(percentile_10) if total <= 0), None)
+            sharpe_with_def = float(np.mean(mc_sharpes_with))
+            ret_with_def = float(np.mean(mc_rets_with))
             
             if defense_active and len(mc_net_assets_no_def) > 0:
                 mc_net_assets_no_def = np.array(mc_net_assets_no_def)
                 percentile_10_no_def = np.percentile(mc_net_assets_no_def, 10, axis=0)
                 depletion_age_p10_no_def = next((ages[i] for i, total in enumerate(percentile_10_no_def) if total <= 0), None)
+                sharpe_no_def = float(np.mean(mc_sharpes_no))
+                ret_no_def = float(np.mean(mc_rets_no))
             else:
                 percentile_10_no_def = None
                 depletion_age_p10_no_def = None
+                sharpe_no_def = sharpe_with_def
+                ret_no_def = ret_with_def
                 
             mc_avg_spot_count = float(np.mean(mc_spot_counts))
             mc_avg_spot_total = float(np.mean(mc_spot_totals))
@@ -3126,7 +3239,9 @@ try:
                 "percentile_90": percentile_90, "percentile_50": percentile_50, "percentile_10": percentile_10,
                 "depletion_age_p10": depletion_age_p10, "percentile_10_no_def": percentile_10_no_def,
                 "depletion_age_p10_no_def": depletion_age_p10_no_def, "mc_avg_spot_count": mc_avg_spot_count,
-                "mc_avg_spot_total": mc_avg_spot_total, "res_p10_rep": res_p10_rep, "res_p50_rep": res_p50_rep, "res_p90_rep": res_p90_rep
+                "mc_avg_spot_total": mc_avg_spot_total, "res_p10_rep": res_p10_rep, "res_p50_rep": res_p50_rep, "res_p90_rep": res_p90_rep,
+                "sharpe_with_def": sharpe_with_def, "sharpe_no_def": sharpe_no_def,
+                "ret_with_def": ret_with_def, "ret_no_def": ret_no_def
             }
         else:
             cached = st.session_state['mc_cached_data']
@@ -3141,6 +3256,10 @@ try:
             res_p10_rep = cached["res_p10_rep"]
             res_p50_rep = cached["res_p50_rep"]
             res_p90_rep = cached["res_p90_rep"]
+            sharpe_with_def = cached.get("sharpe_with_def", 0.0)
+            sharpe_no_def = cached.get("sharpe_no_def", 0.0)
+            ret_with_def = cached.get("ret_with_def", 0.0)
+            ret_no_def = cached.get("ret_no_def", 0.0)
             
         res = res_base
 
@@ -3194,9 +3313,13 @@ try:
         with col4:
             color_class_req2 = "red" if req_invested > 0 else ""
             st.markdown(f'<div class="metric-card"><div class="metric-title" style="font-size:0.9rem;">退職時の必要額 (運用 / 貯金のみ)</div><div class="metric-value {color_class_req2}" style="font-size:1.35rem;">{format_man_oku_val(req_invested/10000)}<br><span style="font-size:0.95rem;color:#495057;">(貯金: {format_man_oku_val(req_cash/10000)})</span></div></div>', unsafe_allow_html=True)
-    elif sim_mode == "ヒストリカル・バックテスト（S&P500 / オルカンの過去実績を適用）":
-        short_main = "S&P500" if "S&P500" in hist_index_choice else "オルカン"
-        short_sub = "オルカン" if "S&P500" in hist_index_choice else "S&P500"
+    elif "ヒストリカル・バックテスト" in sim_mode:
+        def get_short_idx_name(full_name):
+            if "NASDAQ100" in full_name: return "NASDAQ100"
+            elif "S&P500" in full_name: return "S&P500"
+            else: return "オルカン"
+        short_main = get_short_idx_name(hist_index_choice)
+        short_sub = get_short_idx_name(sub_index_choice)
         check_idx = ages.index(85) if 85 in ages else -1
         with col1:
             color_class = "red" if depletion_age else ""
@@ -3227,7 +3350,7 @@ try:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-# --- ★新設：シミュレーション数値連動型「AI家計・資産改善ポテンシャル診断」 ---
+    # --- ★新設：シミュレーション数値連動型「AI家計・資産改善ポテンシャル診断」 ---
     init_fam_ded = 380000 if (has_marriage and current_age >= marriage_age and (not actual_sp_working or sp_gross_income <= 1500000)) else 0
     for ch in child_settings:
         c_a = current_age - ch["birth_age"]
@@ -3263,7 +3386,6 @@ try:
 
         diag_cols = st.columns(3)
         
-        # 診断1：住宅ローンの金利引き下げポテンシャル（設定中のローンがある場合、金利-0.3%での削減額を実計算）
         with diag_cols[0]:
             if housing_type == "持ち家" and has_existing_mortgage and ex_housing_loan_balance > 0 and ex_housing_loan_rate > 0.004:
                 reduced_rate = max(0.003, ex_housing_loan_rate - 0.003)
@@ -3280,14 +3402,12 @@ try:
                 st.markdown(f"🏠 **新規住宅ローンの金利比較効果**\n\n借入予定（{format_man_oku_val(housing_loan_amount/10000)}）の金利を **0.3%低く** 選ぶだけで、総返済額が **約{format_man_oku_val(save_loan_man)} お得**になります。")
                 st.link_button("👉 住宅ローンの最安金利を比較・診断する (PR)", AFFILIATE_LINKS["mortgage"], use_container_width=True)
             else:
-                # ローンがない場合はクレカ積立＋証券口座のポテンシャルを表示
                 annual_inv_man = (invest_monthly + (sp_invest_monthly if has_marriage else 0)) * 12 / 10000
                 invest_yrs = max(5, invest_end_age - current_age) if has_investment else 20
                 pt_gain_man = max(5, int(min(120, max(36, annual_inv_man)) * 0.01 * invest_yrs))
                 st.markdown(f"💳 **クレカ積立＆非課税枠の活用**\n\n毎月の積立をネット証券×高還元クレカで行うだけで、運用益とは別に **累計 約{pt_gain_man}万円相当のポイント** が自動で貯まります。")
                 st.link_button("👉 NISA・クレカ積立に強いネット証券を見る (PR)", AFFILIATE_LINKS["securities"], use_container_width=True)
 
-        # 診断2：保険料・固定費の見直し→投資スイープ効果（85歳時点の複利効果を実計算）
         with diag_cols[1]:
             yrs_to_85 = max(10, 85 - current_age)
             monthly_cut_target = 1.0 if insurance_premium_monthly >= 10000 else 1.5
@@ -3299,7 +3419,6 @@ try:
                 st.markdown(f"🔍 **ライフプランの『答え合わせ』**\n\n固定費や保険・税制の最適化で **月1.5万円** の余剰を作り運用に回せれば、85歳時点の純資産は **＋{format_man_oku_val(fv_cut_man)} 上乗せ**されます。")
             st.link_button("👨‍💼 【無料】FPに家計とプランの最適化を相談 (PR)", AFFILIATE_LINKS["fp_consult"], use_container_width=True)
 
-        # 診断3：待機資金（ドライパウダー）の金利差 or 自宅査定ポテンシャル
         with diag_cols[2]:
             if has_dry_powder and (initial_dry_powder > 0 or dp_max_cap > 0):
                 base_dp_man = max(initial_dry_powder, dp_max_cap) / 10000
@@ -3318,28 +3437,47 @@ try:
         st.caption("※下位10%の悲観シナリオは、暴落相場や長期低迷に直面した場合のストレステストとして機能します。")
         
         if has_dry_powder or has_guardrail:
+            active_def_names = []
+            if has_dry_powder: active_def_names.append("待機資金の段階投入")
+            if has_guardrail: active_def_names.append("ガードレール支出削減")
+            active_def_str = " ＋ ".join(active_def_names)
+            st.markdown(f"**🛡️ 暴落対策（{active_def_str}）の有無による比較検証（悲観シナリオ）**")
+
             check_idx = ages.index(85) if 85 in ages else -1
             diff_85_p10 = (percentile_10[check_idx] - percentile_10_no_def[check_idx]) / 10000 if percentile_10_no_def is not None else 0.0
             sign_str = "+" if diff_85_p10 > 0 else ""
             
             if depletion_age_p10_no_def is not None and depletion_age_p10 is None:
-                ext_text = f"枯渇回避！（対策なし: {depletion_age_p10_no_def}歳枯渇 → 枯渇なし）"
+                ext_text = f"枯渇を完全回避！  \n(対策無: **{depletion_age_p10_no_def}歳枯渇** ➡ 対策有: **枯渇なし**)"
             elif depletion_age_p10_no_def is not None and depletion_age_p10 is not None:
                 diff_age = depletion_age_p10 - depletion_age_p10_no_def
-                ext_text = f"資産寿命 {'+' if diff_age >= 0 else ''}{diff_age}年延命！（{depletion_age_p10_no_def}歳 → {depletion_age_p10}歳）"
+                ext_text = f"資産寿命 **{'+' if diff_age >= 0 else ''}{diff_age}年** 延命！  \n(対策無: **{depletion_age_p10_no_def}歳** ➡ 対策有: **{depletion_age_p10}歳**)"
+            elif depletion_age_p10_no_def is None and depletion_age_p10 is not None:
+                ext_text = f"対策無: **枯渇なし** ➡ 対策有: **{depletion_age_p10}歳**"
             else:
-                ext_text = "悲観シナリオでも枯渇なしを維持"
+                ext_text = "対策無・対策有ともに **枯渇なし**  \n(※純資産額と運用効率の差を比較)"
                 
-            col_def1, col_def2, col_def3 = st.columns(3)
+            sharpe_diff = sharpe_with_def - sharpe_no_def
+            sharpe_sign = "+" if sharpe_diff >= 0 else ""
+            ret_diff_pct = (ret_with_def - ret_no_def) * 100
+            ret_sign = "+" if ret_diff_pct >= 0 else ""
+                
+            col_def1, col_def2, col_def3, col_def4 = st.columns(4)
             with col_def1:
-                st.info(f"🛡️ **暴落対策による純資産改善効果 (悲観・85歳時点)**\n\n### **{sign_str}{format_man_oku_val(diff_85_p10)}**")
+                st.info(f"🛡️ **暴落対策の純資産効果 (悲観・85歳)**\n\n### **{sign_str}{format_man_oku_val(diff_85_p10)}**")
             with col_def2:
-                st.success(f"⏳ **暴落対策による資産寿命の延命効果 (悲観シナリオ)**\n\n**{ext_text}**")
+                st.success(f"⏳ **暴落対策の延命効果 (対策無→有)**\n\n{ext_text}")
             with col_def3:
+                st.info(
+                    f"📐 **暴落対策の運用効率 (対策無→有)**\n\n"
+                    f"シャープ比: **{sharpe_no_def:.2f} ➡ {sharpe_with_def:.2f}** ({sharpe_sign}{sharpe_diff:.2f})  \n"
+                    f"実効年率: **{ret_no_def*100:.1f}% ➡ {ret_with_def*100:.1f}%** ({ret_sign}{ret_diff_pct:.1f}%)"
+                )
+            with col_def4:
                 if has_dry_powder:
-                    st.warning(f"🎯 **待機資金スポット投資の発動実績 (300回平均)**\n\n生涯平均 **{mc_avg_spot_count:.1f} 回** 発動（累計投入: **{format_man_oku_val(mc_avg_spot_total/10000)}**）")
+                    st.warning(f"🎯 **暴落対策の発動実績 (300回平均)**\n\n平均 **{mc_avg_spot_count:.1f} 回** スポット投入  \n（累計: **{format_man_oku_val(mc_avg_spot_total/10000)}**）")
                 else:
-                    st.warning("🛡️ **ガードレール（自動支出カット）稼働中**\n\n暴落年に生活費とイベント費を自動削減しています。")
+                    st.warning("🛡️ **暴落対策の発動状況**\n\nガードレール稼働中（暴落年に生活費・イベント費を自動削減）")
 
         if has_dry_powder or has_guardrail:
             mc_view_opts = [
@@ -3362,44 +3500,65 @@ try:
         st.plotly_chart(fig_mc, use_container_width=True, config={'displayModeBar': False})
         st.markdown("---")
 
-    elif sim_mode == "ヒストリカル・バックテスト（S&P500 / オルカンの過去実績を適用）":
-        st.markdown(f"### 📜 過去実績バックテスト推移（{hist_start_year}年相場サイクル開始）")
+    elif "ヒストリカル・バックテスト" in sim_mode:
+        short_main = "NASDAQ100" if "NASDAQ100" in hist_index_choice else ("S&P500" if "S&P500" in hist_index_choice else "オルカン")
+        short_sub = "NASDAQ100" if "NASDAQ100" in sub_index_choice else ("S&P500" if "S&P500" in sub_index_choice else "オルカン")
+        st.markdown(f"#### 📜 過去実績バックテスト推移（{hist_start_year}年〜：{short_main} vs {short_sub}）")
         st.caption("※カーソルを合わせると、その年齢に適用された実際の歴史上の年号（例：2008年リーマンショック等）と純資産額が確認できます。")
         
         if has_dry_powder or has_guardrail:
+            active_def_names = []
+            if has_dry_powder: active_def_names.append("待機資金の段階投入")
+            if has_guardrail: active_def_names.append("ガードレール支出削減")
+            active_def_str = " ＋ ".join(active_def_names)
+            st.markdown(f"**🛡️ 暴落対策（{active_def_str}）の有無による比較検証（{short_main} / {hist_start_year}年〜）**")
+
             check_idx = ages.index(85) if 85 in ages else -1
             diff_85_hist = (hist_net_main[check_idx] - hist_net_no_def[check_idx]) / 10000 if hist_net_no_def is not None else 0.0
             sign_str = "+" if diff_85_hist > 0 else ""
             
             if depletion_age_hist_no_def is not None and depletion_age is None:
-                ext_text = f"枯渇回避！（対策なし: {depletion_age_hist_no_def}歳枯渇 → 枯渇なし）"
+                ext_text = f"枯渇を完全回避！  \n(対策無: **{depletion_age_hist_no_def}歳枯渇** ➡ 対策有: **枯渇なし**)"
             elif depletion_age_hist_no_def is not None and depletion_age is not None:
                 diff_age = depletion_age - depletion_age_hist_no_def
-                ext_text = f"資産寿命 {'+' if diff_age >= 0 else ''}{diff_age}年延命！（{depletion_age_hist_no_def}歳 → {depletion_age}歳）"
+                ext_text = f"資産寿命 **{'+' if diff_age >= 0 else ''}{diff_age}年** 延命！  \n(対策無: **{depletion_age_hist_no_def}歳** ➡ 対策有: **{depletion_age}歳**)"
+            elif depletion_age_hist_no_def is None and depletion_age is not None:
+                ext_text = f"対策無: **枯渇なし** ➡ 対策有: **{depletion_age}歳**"
             else:
-                ext_text = "この歴史的相場でも枯渇なしを維持"
+                ext_text = "対策無・対策有ともに **枯渇なし**  \n(※純資産額と運用効率の差を比較)"
                 
-            col_def1, col_def2, col_def3 = st.columns(3)
+            sharpe_diff_h = sharpe_with_def - sharpe_no_def
+            sharpe_sign_h = "+" if sharpe_diff_h >= 0 else ""
+            ret_diff_pct_h = (ret_with_def - ret_no_def) * 100
+            ret_sign_h = "+" if ret_diff_pct_h >= 0 else ""
+                
+            col_def1, col_def2, col_def3, col_def4 = st.columns(4)
             with col_def1:
-                st.info(f"🛡️ **暴落対策による純資産改善効果 (85歳時点)**\n\n### **{sign_str}{format_man_oku_val(diff_85_hist)}**")
+                st.info(f"🛡️ **暴落対策の純資産効果 (85歳時点)**\n\n### **{sign_str}{format_man_oku_val(diff_85_hist)}**")
             with col_def2:
-                st.success(f"⏳ **暴落対策による資産寿命の延命効果**\n\n**{ext_text}**")
+                st.success(f"⏳ **暴落対策の延命効果 (対策無→有)**\n\n{ext_text}")
             with col_def3:
+                st.info(
+                    f"📐 **暴落対策の運用効率 (対策無→有)**\n\n"
+                    f"シャープ比: **{sharpe_no_def:.2f} ➡ {sharpe_with_def:.2f}** ({sharpe_sign_h}{sharpe_diff_h:.2f})  \n"
+                    f"実効年率: **{ret_no_def*100:.1f}% ➡ {ret_with_def*100:.1f}%** ({ret_sign_h}{ret_diff_pct_h:.1f}%)"
+                )
+            with col_def4:
                 if has_dry_powder:
-                    st.warning(f"🎯 **待機資金スポット投資の発動実績**\n\n計 **{int(mc_avg_spot_count)} 回** 発動（累計投入: **{format_man_oku_val(mc_avg_spot_total/10000)}**）")
+                    st.warning(f"🎯 **暴落対策の発動実績**\n\n計 **{int(mc_avg_spot_count)} 回** スポット投入  \n（累計: **{format_man_oku_val(mc_avg_spot_total/10000)}**）")
                 else:
-                    st.warning("🛡️ **ガードレール（自動支出カット）稼働中**\n\n歴史的暴落年に生活費とイベント費を自動削減しています。")
+                    st.warning("🛡️ **暴落対策の発動状況**\n\nガードレール稼働中（歴史的暴落年に生活費・イベント費を自動削減）")
 
         if has_dry_powder or has_guardrail:
             hb_view_opts = [
-                "🌐 通常全体表示（S&P500 vs オルカン ＆ 対策有無）",
+                f"🌐 通常全体表示（{short_main} vs {short_sub} ＆ 対策有無）",
                 "📐 対数圧縮スケール（下位の線も広げて見やすくする）",
                 "📊 暴落対策効果（対策あり − 対策なしの差額クローズアップ）"
             ]
             hb_view_map = {hb_view_opts[0]: "all", hb_view_opts[1]: "symlog", hb_view_opts[2]: "diff"}
         else:
             hb_view_opts = [
-                "🌐 通常全体表示（S&P500 vs オルカン）",
+                f"🌐 通常全体表示（{short_main} vs {short_sub}）",
                 "📐 対数圧縮スケール（下位の線も広げて見やすくする）"
             ]
             hb_view_map = {hb_view_opts[0]: "all", hb_view_opts[1]: "symlog"}
@@ -3440,12 +3599,19 @@ try:
         if has_dry_powder and spot_count_this > 0:
             spot_ages_list = [f"{ages[idx]}歳({format_man_oku_val(res['arr_spot_invest'][idx]/10000)})" for idx in range(years_count) if res["arr_spot_invest"][idx] > 0]
             st.caption(f"🎯 **選択中のシナリオでのスポット投資発動履歴（計{spot_count_this}回 / 合計{format_man_oku_val(spot_total_this)}投入）：** " + "、 ".join(spot_ages_list))
-    elif sim_mode == "ヒストリカル・バックテスト（S&P500 / オルカンの過去実績を適用）":
+    elif "ヒストリカル・バックテスト" in sim_mode:
         st.markdown("### 📊 詳細キャッシュフロー分析（過去実績バックテスト内訳）")
-        hb_detail_opts = [
-            f"📌 メイン検証：{hist_index_choice}（暴落対策あり）",
-            f"🔄 比較対象：{sub_index_choice}（暴落対策あり）"
-        ] + ([f"🛡️ 比較対象：{hist_index_choice}（もし暴落対策がなかった場合）"] if res_no_def is not None else [])
+        if res_no_def is not None:
+            hb_detail_opts = [
+                f"📌 メイン検証：{hist_index_choice}（暴落対策あり）",
+                f"🔄 比較対象：{sub_index_choice}（暴落対策あり）",
+                f"🛡️ 比較対象：{hist_index_choice}（もし暴落対策がなかった場合）"
+            ]
+        else:
+            hb_detail_opts = [
+                f"📌 メイン検証：{hist_index_choice}",
+                f"🔄 比較対象：{sub_index_choice}"
+            ]
         selected_hb_detail = st.radio("下の棒グラフ・キャッシュフロー表に表示するデータを選択してください：", hb_detail_opts, index=0, horizontal=True)
         if selected_hb_detail == hb_detail_opts[0]:
             res = res_base
@@ -3539,24 +3705,33 @@ try:
             df_ret_tax = pd.DataFrame(res["arr_ret_tax_details"])
             st.dataframe(df_ret_tax, use_container_width=True, hide_index=True)
 
-    # --- アフィリエイト・ネクストアクション エリア（全ジャンル網羅・4カード構成） ---
+    # --- アフィリエイト・ネクストアクション エリア（難易度順・スマホ順対応2段×2列構成） ---
     st.markdown("---")
     st.markdown("### 🚀 シミュレーション結果を現実にする4つのネクストアクション")
-    st.caption("※設計したライフプランを実行に移すための、おすすめの無料ツール・相談窓口です。")
+    st.caption("※始めやすい（ハードルの低い）ステップから順に、設計したライフプランを実行に移すための無料ツール・相談窓口です。")
 
+    # 1段目（PCでは左にStep1・右にStep2、スマホでは上からStep1→Step2）
     col_act1, col_act2 = st.columns(2)
     with col_act1:
         with st.container(border=True):
-            if depletion_age is not None or (sim_mode != "定率シミュレーション（基本）" and depletion_age_p10 is not None):
-                st.error("🥇 **Step 1：プロのFPと「資金不足の解消・保険見直し」を行う**")
-                st.write("悲観シナリオ等で資金不足が予測されています。自己判断で無理なリスクを取る前に、まずはプロと一緒に「保険料などの固定費削減」や「無理のない収支改善」を行うのが最も確実です。")
-            else:
-                st.success("🥇 **Step 1：作ったプランに死角がないかプロのFPと「答え合わせ」する**")
-                st.write("シミュレーション上は非常に優秀な結果です！このプラン（URL）をそのままFPに見せて、相続や税制改正、教育費・住宅費の見落としがないか無料のセカンドオピニオンを受けてみましょう。")
-            st.link_button("👨‍💼 【無料】プロにライフプラン・保険見直しを相談する (PR)", AFFILIATE_LINKS["fp_consult"], use_container_width=True)
+            st.markdown("🎁 **Step 1：まずは手軽な「ふるさと納税・家計自動化」から始める**")
+            st.write("実質2,000円負担のふるさと納税による食費・日用品費の削減や、無料家計簿アプリでの支出の自動可視化は、リスクゼロで今日からすぐ始められる最も手軽な第一歩です。")
+            c_sub1, c_sub2, c_sub3 = st.columns(3)
+            with c_sub1:
+                if "furusato_limit_total" not in locals():
+                    _f_main = calc_furusato_limit(res_base["arr_salary"][0], res_base["arr_pension"][0], 0, 0, current_age, actual_is_working)
+                    _f_sp = calc_furusato_limit(res_base["arr_sp_salary"][0], res_base["arr_sp_pension"][0], 0, 0, current_age + sp_age_diff, actual_sp_working) if has_marriage else 0
+                    furusato_limit_total = _f_main + _f_sp
+                fur_btn_label = f"🎁 ふるさと納税(上限{furusato_limit_total/10000:,.1f}万) (PR)" if furusato_limit_total >= 10000 else "🎁 ふるさと納税 (PR)"
+                st.link_button(fur_btn_label, AFFILIATE_LINKS["furusato"], type="primary", use_container_width=True)
+            with c_sub2:
+                st.link_button("📱 無料家計簿アプリ (PR)", AFFILIATE_LINKS["kakeibo_app"], use_container_width=True)
+            with c_sub3:
+                st.link_button("💼 年収アップ診断 (PR)", AFFILIATE_LINKS["career_up"], use_container_width=True)
 
+    with col_act2:
         with st.container(border=True):
-            st.info("🥉 **Step 3：NISA枠の最大化 ＆ 暴落待機資金の専用口座を準備する**")
+            st.info("🚀 **Step 2：NISA枠の最大化 ＆ 暴落待機資金の専用口座を準備する**")
             st.write("新NISAでの自動積立や、暴落時に機動的に買い向かうための待機資金（MMF・個人向け国債・高金利連携預金）は、手数料が安くポイント還元率の高いネット証券＋クレカの組み合わせが必須です。")
             c_sec1, c_sec2 = st.columns(2)
             with c_sec1:
@@ -3564,27 +3739,27 @@ try:
             with c_sec2:
                 st.link_button("💳 積立でお得なクレカ (PR)", AFFILIATE_LINKS["credit_card"], use_container_width=True)
 
-    with col_act2:
+    # 2段目（PCでは左にStep3・右にStep4、スマホでは上からStep3→Step4）
+    col_act3, col_act4 = st.columns(2)
+    with col_act3:
         with st.container(border=True):
-            st.warning("🥈 **Step 2：人生最大の固定費「住居費・住宅ローン」を最適化する**")
-            st.write("住宅ローンの金利引き下げ（借り換え・新規比較）や、持ち家の現在の売却相場を把握することは、一度の手続きで数百万円単位の純資産改善につながる最もコスパの高いアクションです。")
+            st.warning("🏠 **Step 3：人生最大の固定費「住居費・住宅ローン」を最適化する**")
+            st.write("住宅ローンの金利引き下げ（借り換え・新規比較）や、持ち家の現在の売却相場を把握することは、Web上の無料診断だけで数百万円単位の純資産改善につながるコスパ抜群のアクションです。")
             c_est1, c_est2 = st.columns(2)
             with c_est1:
                 st.link_button("🏠 モゲチェックで金利診断 (PR)", AFFILIATE_LINKS["mortgage"], use_container_width=True)
             with c_est2:
                 st.link_button("🏢 自宅の無料一括査定 (PR)", AFFILIATE_LINKS["real_estate"], use_container_width=True)
 
+    with col_act4:
         with st.container(border=True):
-            st.markdown("📱 **Step 4：ふるさと納税・家計自動化・収入アップで入金力を高める**")
-            st.write("ふるさと納税による食費・日用品費の削減、家計簿アプリでの支出の自動可視化、そして本業・副業での入金力アップ（昇給・転職）が資産形成を加速させます。")
-            c_sub1, c_sub2, c_sub3 = st.columns(3)
-            with c_sub1:
-                fur_btn_label = f"🎁 ふるさと納税(上限{furusato_limit_total/10000:,.1f}万) (PR)" if furusato_limit_total >= 10000 else "🎁 ふるさと納税 (PR)"
-                st.link_button(fur_btn_label, AFFILIATE_LINKS["furusato"], type="primary", use_container_width=True)
-            with c_sub2:
-                st.link_button("📱 無料家計簿アプリ (PR)", AFFILIATE_LINKS["kakeibo_app"], use_container_width=True)
-            with c_sub3:
-                st.link_button("💼 年収アップ診断 (PR)", AFFILIATE_LINKS["career_up"], use_container_width=True)
+            if depletion_age is not None or (sim_mode == "モンテカルロシミュレーション（リスク・暴落を考慮）" and depletion_age_p10 is not None):
+                st.error("👨‍💼 **Step 4：プロのFPと「資金不足の解消・保険見直し」を行う**")
+                st.write("悲観シナリオ等で資金不足が予測されています。自己判断で無理なリスクを取る前に、仕上げとしてプロと一緒に「保険料などの固定費削減」や「無理のない収支改善」を行うのが最も確実です。")
+            else:
+                st.success("👨‍💼 **Step 4：作ったプランに死角がないかプロのFPと「答え合わせ」する**")
+                st.write("シミュレーション上は非常に優秀な結果です！仕上げにこのプラン（URL）をそのままFPに見せて、相続や税制改正、教育費・住宅費の見落としがないか無料のセカンドオピニオンを受けてみましょう。")
+            st.link_button("👨‍💼 【無料】プロにライフプラン・保険見直しを相談する (PR)", AFFILIATE_LINKS["fp_consult"], use_container_width=True)
 
     # --- ★ASP審査通過・コンプライアンス遵守のための免責事項・PR表記 ---
     st.markdown("<br>", unsafe_allow_html=True)
